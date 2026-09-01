@@ -1,0 +1,55 @@
+# CMake output
+/build/
+/build-*/
+/.build/
+/install/
+/dist/
+/stage/
+CMakeCache.txt
+CMakeFiles/
+cmake_install.cmake
+compile_commands.json
+install_manifest.txt
+
+# Visual Studio / MSVC
+.vs/
+*.sln
+*.vcxproj
+*.vcxproj.filters
+*.vcxproj.user
+*.obj
+*.pdb
+*.ilk
+*.exp
+*.lib
+*.exe
+*.dll
+
+# GCC / Clang
+*.o
+*.a
+*.so
+*.so.*
+*.dylib
+*.dSYM/
+
+# Editors and operating systems
+.vscode/
+.idea/
+*.user
+*.swp
+*.swo
+*~
+.DS_Store
+Thumbs.db
+Desktop.ini
+
+# macOS native build and package outputs
+/build-macos*/
+/stage-macos*/
+/dist/
+
+# WebAssembly and GitHub Pages outputs
+/build-wasm*/
+/dist-wasm/
+/.neo-wasm-deps/

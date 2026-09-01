@@ -1,0 +1,115 @@
+name: macOS
+
+on:
+  push:
+  pull_request:
+  repository_dispatch:
+    types: [neoshared-updated]
+  workflow_dispatch:
+    inputs:
+      neoshared_ref:
+        description: exact 40-character neoshared commit SHA (blank uses repository variable NEOSHARED_REF)
+        required: false
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  NEOSHARED_REF: ${{ github.event.client_payload.neoshared_ref || inputs.neoshared_ref || vars.NEOSHARED_REF }}
+  MACOSX_DEPLOYMENT_TARGET: '15.0'
+
+jobs:
+  macos:
+    name: macOS 15 (${{ matrix.arch }})
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: macos-15
+            arch: arm64
+          - runner: macos-15-intel
+            arch: x86_64
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 120
+    env:
+      HOMEBREW_NO_AUTO_UPDATE: '1'
+      HOMEBREW_NO_INSTALL_CLEANUP: '1'
+
+    steps:
+      - name: Check out NeoBIF
+        uses: actions/checkout@v7
+        with:
+          path: tool
+          persist-credentials: false
+
+      - name: Require immutable neoshared revision
+        shell: bash
+        run: |
+          if [[ ! "$NEOSHARED_REF" =~ ^[0-9a-fA-F]{40}$ ]]; then
+            echo "::error::NEOSHARED_REF must be an exact 40-character commit SHA. Set the repository variable or provide the workflow input."
+            exit 1
+          fi
+
+      - name: Check out neoshared
+        uses: actions/checkout@v7
+        with:
+          repository: vrifftech/neoshared
+          ref: ${{ env.NEOSHARED_REF }}
+          path: neoshared
+          persist-credentials: false
+
+      - name: Verify neoshared revision
+        shell: bash
+        run: |
+          actual="$(git -C neoshared rev-parse HEAD)"
+          expected="$(printf '%s' "$NEOSHARED_REF" | tr '[:upper:]' '[:lower:]')"
+          test "$actual" = "$expected" || {
+            echo "::error::Expected neoshared $expected, got $actual"
+            exit 1
+          }
+
+      - name: Validate native runner
+        run: |
+          test "$(uname -m)" = "${{ matrix.arch }}"
+          sw_vers
+          xcodebuild -version
+
+      - name: Install dependencies
+        run: |
+          brew install cmake ninja wxwidgets
+          WX_PREFIX="$(brew --prefix wxwidgets)"
+          echo "$WX_PREFIX/bin" >> "$GITHUB_PATH"
+          echo "CMAKE_PREFIX_PATH=$WX_PREFIX" >> "$GITHUB_ENV"
+          "$WX_PREFIX/bin/wx-config" --version
+
+      - name: Build and package NeoBIF
+        working-directory: tool
+        run: |
+          bash ./scripts/build-macos.sh \
+            --arch "${{ matrix.arch }}" \
+            --deployment-target "$MACOSX_DEPLOYMENT_TARGET" \
+            --neoshared-root ../neoshared \
+            --jobs 2 \
+            --clean
+
+      - name: Verify package checksum
+        run: |
+          cd tool/dist
+          shasum -a 256 -c NeoBIF-*-macos-${{ matrix.arch }}.zip.sha256
+          unzip -l NeoBIF-*-macos-${{ matrix.arch }}.zip
+
+      - name: Upload macOS package
+        uses: actions/upload-artifact@v7
+        with:
+          name: NeoBIF-macos-${{ matrix.arch }}-${{ github.sha }}
+          path: |
+            tool/dist/NeoBIF-*-macos-${{ matrix.arch }}.zip
+            tool/dist/NeoBIF-*-macos-${{ matrix.arch }}.zip.sha256
+          if-no-files-found: error
+          retention-days: 14
+          compression-level: 0

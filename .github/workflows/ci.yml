@@ -1,0 +1,189 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+  schedule:
+    - cron: '7 7 * * 1'
+  repository_dispatch:
+    types: [neoshared-updated]
+  workflow_dispatch:
+    inputs:
+      neoshared_ref:
+        description: exact 40-character neoshared commit SHA (blank uses repository variable NEOSHARED_REF)
+        required: false
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  NEOSHARED_REF: ${{ github.event.client_payload.neoshared_ref || inputs.neoshared_ref || vars.NEOSHARED_REF }}
+
+jobs:
+  linux:
+    name: Linux (GCC + system wxWidgets)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+
+    steps:
+      - name: Check out NeoBIF
+        uses: actions/checkout@v7
+        with:
+          path: tool
+          persist-credentials: false
+
+      - name: Require immutable neoshared revision
+        shell: bash
+        run: |
+          if [[ ! "$NEOSHARED_REF" =~ ^[0-9a-fA-F]{40}$ ]]; then
+            echo "::error::NEOSHARED_REF must be an exact 40-character commit SHA. Set the repository variable or provide the workflow input."
+            exit 1
+          fi
+
+      - name: Check out neoshared
+        uses: actions/checkout@v7
+        with:
+          repository: vrifftech/neoshared
+          ref: ${{ env.NEOSHARED_REF }}
+          path: neoshared
+          persist-credentials: false
+
+      - name: Verify neoshared revision
+        shell: bash
+        run: |
+          actual="$(git -C neoshared rev-parse HEAD)"
+          expected="$(printf '%s' "$NEOSHARED_REF" | tr '[:upper:]' '[:lower:]')"
+          test "$actual" = "$expected" || {
+            echo "::error::Expected neoshared $expected, got $actual"
+            exit 1
+          }
+
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install --no-install-recommends -y \
+            build-essential \
+            cmake \
+            ninja-build \
+            pkg-config \
+            libwxgtk3.2-dev
+
+      - name: Configure and build
+        working-directory: tool
+        run: |
+          bash ./scripts/build.sh \
+            --build-dir build \
+            --build-type Release \
+            --wx ON \
+            --require-wx ON \
+            --cli ON \
+            --minimal-release OFF \
+            --generator Ninja \
+            --neoshared-root ../neoshared \
+            --no-vcpkg \
+            --jobs 2 \
+            --clean
+
+      - name: Stage install tree
+        run: cmake --install tool/build --config Release --prefix tool/stage
+
+      - name: Upload Linux artifact
+        if: ${{ github.event_name != 'pull_request' }}
+        uses: actions/upload-artifact@v7
+        with:
+          name: NeoBIF-linux-${{ github.sha }}
+          path: tool/stage/
+          if-no-files-found: error
+          retention-days: 14
+
+  windows:
+    name: Windows (Visual Studio 2026 + wxWidgets 3.3.3)
+    runs-on: windows-2025-vs2026
+    timeout-minutes: 120
+    env:
+      VCPKG_BINARY_SOURCES: clear;x-gha,readwrite
+
+    steps:
+      - name: Check out NeoBIF
+        uses: actions/checkout@v7
+        with:
+          path: tool
+          persist-credentials: false
+
+      - name: Require immutable neoshared revision
+        shell: bash
+        run: |
+          if [[ ! "$NEOSHARED_REF" =~ ^[0-9a-fA-F]{40}$ ]]; then
+            echo "::error::NEOSHARED_REF must be an exact 40-character commit SHA. Set the repository variable or provide the workflow input."
+            exit 1
+          fi
+
+      - name: Check out neoshared
+        uses: actions/checkout@v7
+        with:
+          repository: vrifftech/neoshared
+          ref: ${{ env.NEOSHARED_REF }}
+          path: neoshared
+          persist-credentials: false
+
+      - name: Verify neoshared revision
+        shell: bash
+        run: |
+          actual="$(git -C neoshared rev-parse HEAD)"
+          expected="$(printf '%s' "$NEOSHARED_REF" | tr '[:upper:]' '[:lower:]')"
+          test "$actual" = "$expected" || {
+            echo "::error::Expected neoshared $expected, got $actual"
+            exit 1
+          }
+
+      - name: Enable vcpkg GitHub Actions cache
+        uses: actions/github-script@v9
+        with:
+          script: |
+            core.exportVariable('ACTIONS_CACHE_URL', process.env.ACTIONS_CACHE_URL || '');
+            core.exportVariable('ACTIONS_RUNTIME_TOKEN', process.env.ACTIONS_RUNTIME_TOKEN || '');
+
+      - name: Install wxWidgets 3.3.3
+        shell: pwsh
+        run: |
+          & .\neoshared\scripts\install-wxwidgets.ps1 `
+            -VcpkgRoot $env:VCPKG_INSTALLATION_ROOT `
+            -Triplet x64-windows-static `
+            -CleanAfterBuild
+
+      - name: Configure and build
+        working-directory: tool
+        shell: pwsh
+        run: |
+          .\scripts\build.ps1 `
+            -BuildDir build `
+            -BuildType Release `
+            -Wx ON `
+            -RequireWx ON `
+            -Cli ON `
+            -MinimalRelease OFF `
+            -Generator 'Visual Studio 18 2026' `
+            -Platform x64 `
+            -NeoSharedRoot ..\neoshared `
+            -VcpkgRoot $env:VCPKG_INSTALLATION_ROOT `
+            -VcpkgTriplet x64-windows-static `
+            -Parallel 2 `
+            -Clean
+
+      - name: Stage install tree
+        shell: pwsh
+        run: cmake --install tool/build --config Release --prefix tool/stage
+
+      - name: Upload Windows artifact
+        if: ${{ github.event_name != 'pull_request' }}
+        uses: actions/upload-artifact@v7
+        with:
+          name: NeoBIF-windows-vs2026-${{ github.sha }}
+          path: tool/stage/
+          if-no-files-found: error
+          retention-days: 14
