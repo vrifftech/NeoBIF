@@ -10,7 +10,7 @@ on:
   workflow_dispatch:
     inputs:
       neoshared_ref:
-        description: exact 40-character neoshared commit SHA (blank uses repository variable NEOSHARED_REF)
+        description: neoshared branch, tag, or commit SHA (blank uses NEOSHARED_REF or main)
         required: false
         type: string
 
@@ -22,7 +22,7 @@ concurrency:
   cancel-in-progress: true
 
 env:
-  NEOSHARED_REF: ${{ github.event.client_payload.neoshared_ref || inputs.neoshared_ref || vars.NEOSHARED_REF }}
+  NEOSHARED_REF: ${{ github.event.client_payload.neoshared_ref || inputs.neoshared_ref || vars.NEOSHARED_REF || 'main' }}
 
 jobs:
   linux:
@@ -37,31 +37,56 @@ jobs:
           path: tool
           persist-credentials: false
 
-      - name: Require immutable neoshared revision
+      - name: Resolve neoshared revision
+        id: neoshared_ref
         shell: bash
         run: |
-          if [[ ! "$NEOSHARED_REF" =~ ^[0-9a-fA-F]{40}$ ]]; then
-            echo "::error::NEOSHARED_REF must be an exact 40-character commit SHA. Set the repository variable or provide the workflow input."
+          set -euo pipefail
+          requested="${NEOSHARED_REF:-main}"
+          if [[ "$requested" =~ ^[0-9a-fA-F]{40}$ ]]; then
+            resolved="${requested,,}"
+          else
+            remote="https://github.com/vrifftech/neoshared.git"
+            resolved=""
+            refspecs=(
+              "refs/heads/$requested"
+              "refs/tags/$requested^{}"
+              "refs/tags/$requested"
+              "$requested"
+            )
+            for refspec in "${refspecs[@]}"; do
+              candidate="$(git ls-remote "$remote" "$refspec" | awk 'NR == 1 { print tolower($1); exit }')"
+              if [[ "$candidate" =~ ^[0-9a-f]{40}$ ]]; then
+                resolved="$candidate"
+                break
+              fi
+            done
+          fi
+          if [[ ! "$resolved" =~ ^[0-9a-f]{40}$ ]]; then
+            echo "::error::Unable to resolve neoshared reference '$requested' to a commit SHA."
             exit 1
           fi
+          echo "Resolved neoshared '$requested' to $resolved"
+          echo "sha=$resolved" >> "$GITHUB_OUTPUT"
 
       - name: Check out neoshared
         uses: actions/checkout@v7
         with:
           repository: vrifftech/neoshared
-          ref: ${{ env.NEOSHARED_REF }}
+          ref: ${{ steps.neoshared_ref.outputs.sha }}
           path: neoshared
           persist-credentials: false
 
-      - name: Verify neoshared revision
+      - name: Verify resolved neoshared revision
         shell: bash
         run: |
           actual="$(git -C neoshared rev-parse HEAD)"
-          expected="$(printf '%s' "$NEOSHARED_REF" | tr '[:upper:]' '[:lower:]')"
+          expected="${{ steps.neoshared_ref.outputs.sha }}"
           test "$actual" = "$expected" || {
             echo "::error::Expected neoshared $expected, got $actual"
             exit 1
           }
+
 
       - name: Install build dependencies
         run: |
@@ -115,31 +140,56 @@ jobs:
           path: tool
           persist-credentials: false
 
-      - name: Require immutable neoshared revision
+      - name: Resolve neoshared revision
+        id: neoshared_ref
         shell: bash
         run: |
-          if [[ ! "$NEOSHARED_REF" =~ ^[0-9a-fA-F]{40}$ ]]; then
-            echo "::error::NEOSHARED_REF must be an exact 40-character commit SHA. Set the repository variable or provide the workflow input."
+          set -euo pipefail
+          requested="${NEOSHARED_REF:-main}"
+          if [[ "$requested" =~ ^[0-9a-fA-F]{40}$ ]]; then
+            resolved="${requested,,}"
+          else
+            remote="https://github.com/vrifftech/neoshared.git"
+            resolved=""
+            refspecs=(
+              "refs/heads/$requested"
+              "refs/tags/$requested^{}"
+              "refs/tags/$requested"
+              "$requested"
+            )
+            for refspec in "${refspecs[@]}"; do
+              candidate="$(git ls-remote "$remote" "$refspec" | awk 'NR == 1 { print tolower($1); exit }')"
+              if [[ "$candidate" =~ ^[0-9a-f]{40}$ ]]; then
+                resolved="$candidate"
+                break
+              fi
+            done
+          fi
+          if [[ ! "$resolved" =~ ^[0-9a-f]{40}$ ]]; then
+            echo "::error::Unable to resolve neoshared reference '$requested' to a commit SHA."
             exit 1
           fi
+          echo "Resolved neoshared '$requested' to $resolved"
+          echo "sha=$resolved" >> "$GITHUB_OUTPUT"
 
       - name: Check out neoshared
         uses: actions/checkout@v7
         with:
           repository: vrifftech/neoshared
-          ref: ${{ env.NEOSHARED_REF }}
+          ref: ${{ steps.neoshared_ref.outputs.sha }}
           path: neoshared
           persist-credentials: false
 
-      - name: Verify neoshared revision
+      - name: Verify resolved neoshared revision
         shell: bash
         run: |
           actual="$(git -C neoshared rev-parse HEAD)"
-          expected="$(printf '%s' "$NEOSHARED_REF" | tr '[:upper:]' '[:lower:]')"
+          expected="${{ steps.neoshared_ref.outputs.sha }}"
           test "$actual" = "$expected" || {
             echo "::error::Expected neoshared $expected, got $actual"
             exit 1
           }
+
 
       - name: Enable vcpkg GitHub Actions cache
         uses: actions/github-script@v9
