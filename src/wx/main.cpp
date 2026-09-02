@@ -1,6 +1,8 @@
 #include "core/KeyBifArchive.hpp"
 #include "core/Version.hpp"
 #include "NeoGameDirectoryMenu.hpp"
+#include "NeoSettings.hpp"
+#include "NeoViewState.hpp"
 #include "NeoWxUi.hpp"
 #include "neobif_icon.xpm"
 
@@ -105,6 +107,9 @@ enum {
     ID_CollapseAll,
     ID_GroupByType,
     ID_DarkMode,
+    ID_FontIncrease,
+    ID_FontDecrease,
+    ID_FontReset,
     ID_FilterTimer,
 };
 
@@ -122,6 +127,9 @@ public:
         int widths[] = {-1, 270};
         GetStatusBar()->SetStatusWidths(2, widths);
         wxui::configureResponsiveWindow(*this, wxSize(1220, 760), wxSize(820, 520));
+        fontScale_ = settings_.fontScale();
+        fontScaleWheelFilter_.attach(this, [this](int steps) { changeFontScaleSteps(steps); });
+        neoview::bindFontScaleDpiRefresh(this, [this]() { applyFontScale(); });
         applyDarkMode();
         updateStatus();
     }
@@ -165,7 +173,10 @@ private:
     wxMenuItem* groupByTypeItem_{nullptr};
     wxMenuItem* darkModeItem_{nullptr};
     std::unique_ptr<neogames::OpenGameDirectoryMenu> gameDirectoryMenu_;
+    neosettings::AppSettings settings_{"NeoBIF"};
     wxTimer filterTimer_;
+    neoview::FontScaleWheelFilter fontScaleWheelFilter_;
+    double fontScale_ = neoview::kDefaultFontScale;
     bool groupByType_{true};
     bool darkMode_{};
 
@@ -219,6 +230,10 @@ private:
         view->AppendSeparator();
         darkModeItem_ = view->AppendCheckItem(ID_DarkMode, "&Dark Mode");
         darkModeItem_->Check(darkMode_);
+        view->AppendSeparator();
+        view->Append(ID_FontIncrease, "Increase Font Size\tCtrl++");
+        view->Append(ID_FontDecrease, "Decrease Font Size\tCtrl+-");
+        view->Append(ID_FontReset, "Reset Font Size\tCtrl+0");
 
         auto* help = new wxMenu;
         help->Append(wxID_ABOUT, "&About NeoBIF");
@@ -307,6 +322,9 @@ private:
             wxui::writeDarkMode("NeoBIF", darkMode_);
             applyDarkMode();
         }, ID_DarkMode);
+        Bind(wxEVT_MENU, &NeoBIFFrame::onIncreaseFontScale, this, ID_FontIncrease);
+        Bind(wxEVT_MENU, &NeoBIFFrame::onDecreaseFontScale, this, ID_FontDecrease);
+        Bind(wxEVT_MENU, &NeoBIFFrame::onResetFontScale, this, ID_FontReset);
         Bind(wxEVT_MENU, [this](wxCommandEvent&) { showAbout(); }, wxID_ABOUT);
         Bind(wxEVT_TIMER, [this](wxTimerEvent&) { rebuildTree(); }, ID_FilterTimer);
         filter_->Bind(wxEVT_TEXT, [this](wxCommandEvent&) { filterTimer_.StartOnce(180); });
@@ -319,6 +337,54 @@ private:
             updateCommandState();
         });
         tree_->Bind(wxEVT_TREE_ITEM_ACTIVATED, [this](wxTreeEvent&) { extractSelected(false); });
+        tree_->Bind(wxEVT_TREE_ITEM_MENU, &NeoBIFFrame::onTreeItemMenu, this);
+    }
+
+    void onTreeItemMenu(wxTreeEvent& event) {
+        const wxTreeItemId item = event.GetItem();
+        if (!item.IsOk()) return;
+
+        tree_->SelectItem(item);
+        showSelectedDetails();
+        updateCommandState();
+
+        const NodeData* data = selectedNodeData();
+        if (data == nullptr) return;
+
+        const auto indices = selectedResourceIndices();
+        const bool hasExtractable = std::any_of(
+            indices.begin(), indices.end(), [this](std::size_t index) {
+                return index < archive_.resources().size() &&
+                       archive_.resources()[index].extractable;
+            });
+
+        wxString extractLabel = "&Extract Selection...";
+        wxString zipLabel = "Save Selection as &ZIP...";
+        switch (data->kind) {
+        case NodeKind::Root:
+            extractLabel = "Extract &All...";
+            zipLabel = "Save All as &ZIP...";
+            break;
+        case NodeKind::Bif:
+            extractLabel = "Extract &BIF...";
+            zipLabel = "Save BIF as &ZIP...";
+            break;
+        case NodeKind::Type:
+            extractLabel = "Extract Resource &Type...";
+            zipLabel = "Save Resource Type as &ZIP...";
+            break;
+        case NodeKind::Resource:
+            extractLabel = "Extract &Resource...";
+            zipLabel = "Save Resource as &ZIP...";
+            break;
+        }
+
+        wxMenu menu;
+        wxMenuItem* extractItem = menu.Append(ID_ExtractSelected, extractLabel);
+        wxMenuItem* zipItem = menu.Append(ID_ZipSelected, zipLabel);
+        extractItem->Enable(hasExtractable);
+        zipItem->Enable(hasExtractable);
+        PopupMenu(&menu);
     }
 
     void requestOpenArchiveFiles() {
@@ -706,7 +772,7 @@ private:
         frame->supplementaryFiles_.clear();
         ++frame->browserGeneration_;
         frame->keyLabel_->SetLabel(wxui::toWx(key->relativePath));
-        frame->SetTitle(appTitle() + " — " +
+        frame->SetTitle(appTitle() + " - " +
                         wxui::toWx(frame->keyPath_.filename().string()));
         frame->rebuildTree();
         frame->updateStatus();
@@ -738,7 +804,7 @@ private:
         keyPath_ = key;
         supplementaryFiles_ = std::move(supplementary);
         keyLabel_->SetLabel(neosettings::pathToWx(keyPath_));
-        SetTitle(appTitle() + " — " + neosettings::pathToWx(keyPath_.filename()));
+        SetTitle(appTitle() + " - " + neosettings::pathToWx(keyPath_.filename()));
         rebuildTree();
         updateStatus();
         updateCommandState();
@@ -788,7 +854,7 @@ private:
 
         const std::string filterText = lowerAscii(wxui::toStd(filter_->GetValue()));
         const wxString rootLabel = neosettings::pathToWx(keyPath_.filename()) +
-            wxui::toWx(" — " + std::to_string(archive_.resources().size()) +
+            wxui::toWx(" - " + std::to_string(archive_.resources().size()) +
                        " resources (" + std::to_string(archive_.extractableResourceCount()) +
                        " extractable)");
         const wxTreeItemId root = tree_->AddRoot(rootLabel, -1, -1,
@@ -822,7 +888,7 @@ private:
 
             std::ostringstream label;
             label << '[' << std::setw(2) << std::setfill('0') << bif.index << "] "
-                  << bif.storedPath << " — " << bif.resourceIndices.size() << " resources";
+                  << bif.storedPath << " - " << bif.resourceIndices.size() << " resources";
             if (!bif.available) label << " [MISSING]";
             else if (!bif.valid) label << " [INVALID]";
             const wxTreeItemId bifNode = tree_->AppendItem(
@@ -835,7 +901,7 @@ private:
                     groups[archive_.resources()[resourceIndex].type].push_back(resourceIndex);
                 }
                 for (const auto& [type, indices] : groups) {
-                    const std::string typeLabel = neobif::resourceTypeLabel(type) + " — " +
+                    const std::string typeLabel = neobif::resourceTypeLabel(type) + " - " +
                                                   std::to_string(indices.size());
                     const wxTreeItemId typeNode = tree_->AppendItem(
                         bifNode, wxui::toWx(typeLabel), -1, -1,
@@ -872,7 +938,7 @@ private:
     void appendResourceNode(const wxTreeItemId& parent, std::size_t resourceIndex) {
         const auto& resource = archive_.resources()[resourceIndex];
         std::ostringstream label;
-        label << resource.fileName() << " — " << neobif::formatByteSize(resource.size);
+        label << resource.fileName() << " - " << neobif::formatByteSize(resource.size);
         if (!resource.extractable) label << " [UNAVAILABLE]";
         if (!resource.keyed) label << " [UNINDEXED]";
         tree_->AppendItem(parent, wxui::toWx(label.str()), -1, -1,
@@ -1301,6 +1367,36 @@ private:
         if (darkModeItem_ != nullptr) darkModeItem_->Check(darkMode_);
         wxui::applyTheme(this, darkMode_);
         if (tree_ != nullptr) wxui::applyTreeTheme(*tree_, darkMode_);
+        applyFontScale();
+    }
+
+    void applyFontScale() {
+        neoview::applyFontScale(this, fontScale_);
+    }
+
+    void changeFontScaleSteps(int steps) {
+        const double next = neoview::steppedFontScale(fontScale_, steps);
+        if (neoview::fontScalePercent(next) == neoview::fontScalePercent(fontScale_)) return;
+        fontScale_ = next;
+        settings_.setFontScale(fontScale_);
+        applyFontScale();
+    }
+
+    void onIncreaseFontScale(wxCommandEvent&) {
+        fontScaleWheelFilter_.reset();
+        changeFontScaleSteps(1);
+    }
+
+    void onDecreaseFontScale(wxCommandEvent&) {
+        fontScaleWheelFilter_.reset();
+        changeFontScaleSteps(-1);
+    }
+
+    void onResetFontScale(wxCommandEvent&) {
+        fontScaleWheelFilter_.reset();
+        fontScale_ = neoview::kDefaultFontScale;
+        settings_.setFontScale(fontScale_);
+        applyFontScale();
     }
 
     void showAbout() {
