@@ -1,16 +1,6 @@
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 256 256" width="256" height="256">
-  <defs>
-    <linearGradient id="g" x1="0" y1="0" x2="1" y2="1">
-      <stop offset="0" stop-color="#28557a"/>
-      <stop offset="1" stop-color="#17324d"/>
-    </linearGradient>
-  </defs>
-  <rect x="12" y="12" width="232" height="232" rx="34" fill="url(#g)"/>
-  <path d="M49 61h70l18 20h70v116H49z" fill="#e7eef4" stroke="#0d2236" stroke-width="8" stroke-linejoin="round"/>
-  <path d="M49 86h158" stroke="#0d2236" stroke-width="8"/>
-  <rect x="72" y="108" width="112" height="18" rx="4" fill="#2c6f8c"/>
-  <rect x="72" y="139" width="88" height="14" rx="4" fill="#7895a8"/>
-  <rect x="72" y="165" width="102" height="14" rx="4" fill="#7895a8"/>
-  <circle cx="190" cy="190" r="33" fill="#e2b13c" stroke="#0d2236" stroke-width="8"/>
-  <path d="M177 190l9 9 18-21" fill="none" stroke="#17324d" stroke-width="8" stroke-linecap="round" stroke-linejoin="round"/>
+<svg version="1.2" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" width="512" height="512">
+	<style>
+		.s0 { fill: #f2da01;stroke: #000000;stroke-width: 7 } 
+	</style>
+	<path id="Bif" class="s0" aria-label="Bif"  d="m174.4 346h-113.9v-126.8h-37.5v-53.7h160.6q29.7 0.3 45 10.3 15.5 9.9 18.8 33.5 1.1 17.9-7.6 28.2-8.8 10.3-28.9 16.9v0.5q9.9 1.2 18.2 5.4 8.4 4 14 9.6 5.8 5.5 8.9 12.5 3.1 7 3.1 13.7 0 21.4-11 32.4-10.8 11-28.1 14.4-17.1 3.4-41.6 3.1zm-11.5-69.9h-40.1v33.4h40.1q10.4 0.4 18.1-4.5 7.8-4.9 7.8-12 0.7-7.9-6.4-12.4-7-4.5-19.5-4.5zm3.5-66.8h-43.6v27.3h43.7q3.6 0 7.6-3.7 4-3.9 4.3-10.3-0.5-7.3-4.9-10.3-4.2-3-7.1-3zm94.6 136.7v-180.5h58.8v180.5zm130.2 0h-58.7v-180.5h154.7v53.8h-96v20.7h62v31.5h-62z"/>
 </svg>
