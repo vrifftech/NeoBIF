@@ -1,4 +1,8 @@
 #include "core/KeyBifArchive.hpp"
+#include "core/ArchiveExport.hpp"
+#include <csignal>
+#include <map>
+#include <stdexcept>
 #include "core/Version.hpp"
 
 #include <algorithm>
@@ -9,6 +13,9 @@
 #include <vector>
 
 namespace {
+volatile std::sig_atomic_t cancelled=0;
+void cancelSignal(int) {cancelled=1;}
+
 
 std::string lowerAscii(std::string value) {
     std::transform(value.begin(), value.end(), value.begin(), [](unsigned char ch) {
@@ -34,7 +41,9 @@ void usage() {
         << "options:\n"
         << "  --filter TEXT        Extract/list matching resource names, types, or BIF paths\n"
         << "  --layout MODE        bif-type (default), bif, type, or flat\n"
-        << "  --overwrite          Replace existing extracted files\n";
+        << "  --overwrite          Replace existing outputs (never input archives)\n"
+        << "  --keep-both          Explicitly suffix conflicting extraction names\n"
+        << "  --relocate INDEX BIF Explicitly map a KEY BIF-table index to a file\n";
 }
 
 neobif::ExtractionLayout parseLayout(const std::string& value) {
@@ -42,7 +51,8 @@ neobif::ExtractionLayout parseLayout(const std::string& value) {
     if (lower == "bif") return neobif::ExtractionLayout::Bif;
     if (lower == "type") return neobif::ExtractionLayout::Type;
     if (lower == "flat") return neobif::ExtractionLayout::Flat;
-    return neobif::ExtractionLayout::BifAndType;
+    if(lower=="bif-type") return neobif::ExtractionLayout::BifAndType;
+    throw std::runtime_error("Unknown output layout: "+value);
 }
 
 std::vector<std::size_t> selectResources(const neobif::KeyBifArchive& archive,
@@ -63,15 +73,17 @@ std::vector<std::size_t> selectResources(const neobif::KeyBifArchive& archive,
 
 bool openArchive(neobif::KeyBifArchive& archive,
                  const std::filesystem::path& key,
-                 const std::vector<std::filesystem::path>& bifs) {
-    if (archive.open(key, bifs)) return true;
+                 const std::vector<std::filesystem::path>& bifs,
+                 const std::map<std::size_t,std::filesystem::path>& relocations, const neobif::JobControl& job) {
+    if (archive.open(key, bifs,relocations,job)) return true;
     std::cerr << "error: " << archive.lastError() << '\n';
     return false;
 }
 
 } // namespace
 
-int main(int argc, char** argv) {
+int run(int argc, char** argv) {
+    neobif::JobControl job;job.cancelled=[]{return cancelled!=0;};
     if (argc < 2) {
         usage();
         return 2;
@@ -91,7 +103,7 @@ int main(int argc, char** argv) {
             usage();
             return 2;
         }
-        const auto keys = neobif::KeyBifArchive::scanForKeyFiles(argv[2]);
+        const auto keys = neobif::KeyBifArchive::scanForKeyFiles(argv[2],64,job);
         for (const auto& key : keys) std::cout << key.string() << '\n';
         return keys.empty() ? 1 : 0;
     }
@@ -117,7 +129,8 @@ int main(int argc, char** argv) {
 
     std::string filter;
     neobif::ExtractionLayout layout = neobif::ExtractionLayout::BifAndType;
-    bool overwrite = false;
+    bool overwrite = false,keepBoth=false;
+    std::map<std::size_t,std::filesystem::path> relocations;
     std::vector<std::filesystem::path> supplementary;
     while (index < argc) {
         const std::string argument = argv[index++];
@@ -135,13 +148,24 @@ int main(int argc, char** argv) {
             layout = parseLayout(argv[index++]);
         } else if (argument == "--overwrite") {
             overwrite = true;
+        } else if (argument == "--keep-both") {
+            keepBoth=true;
+        } else if (argument == "--relocate") {
+            if(index+1>=argc)throw std::runtime_error("--relocate needs INDEX and BIF path");
+            std::string text=argv[index++];std::size_t used=0;
+            const auto number=std::stoull(text,&used);
+            if(used!=text.size()||text.empty()||text[0]=='-')throw std::runtime_error("Invalid KEY BIF-table index");
+            relocations[static_cast<std::size_t>(number)]=argv[index++];
+        } else if(argument.rfind("--",0)==0) {
+            throw std::runtime_error("Unknown option: "+argument);
         } else {
             supplementary.emplace_back(argument);
         }
     }
 
+    if(overwrite&&keepBoth)throw std::runtime_error("Choose either --overwrite or --keep-both");
     neobif::KeyBifArchive archive;
-    if (!openArchive(archive, keyPath, supplementary)) return 1;
+    if (!openArchive(archive, keyPath, supplementary,relocations,job)) return 1;
 
     if (command == "info") {
         std::cout << "KEY: " << archive.keyPath().string() << '\n'
@@ -186,30 +210,40 @@ int main(int argc, char** argv) {
         return 0;
     }
 
-    if (command == "zip") {
+    neobif::ExportOptions options;options.job=job;options.protectedInputs=archive.inputPaths();
+    options.existing=overwrite?neobif::ExistingPolicy::Replace:(keepBoth?neobif::ExistingPolicy::KeepBoth:neobif::ExistingPolicy::Skip);
+    const auto paths=archive.outputPaths(selected,layout);
+    std::vector<neobif::ExportItem> items;
+    for(std::size_t position=0;position<selected.size();++position) {
+        const auto index=selected[position];const auto& resource=archive.resources().at(index);
+        if(!resource.extractable) {std::cerr<<"Held unavailable resource: "<<resource.fileName()<<" ("<<resource.status<<")\n";continue;}
+        neobif::ExportItem item;item.relativePath=paths.at(position);item.displayName=resource.fileName();
+        item.identitySuffix=neobif::hexResourceId(resource.resourceId);item.expectedSize=resource.size;
+        item.sourcePaths={archive.keyPath(),archive.bifs().at(resource.bifIndex).resolvedPath};
+        item.stream=[&archive,index](const neobif::ByteSink& sink,std::string& error,const neobif::JobControl& control){return archive.streamResource(index,sink,error,control);};
+        items.push_back(std::move(item));
+    }
+    const auto unavailable=selected.size()-items.size();
+    if(items.empty())throw std::runtime_error("No extractable matching resources");
+    if(command=="zip") {
+        if(unavailable)throw std::runtime_error("ZIP selection contains unavailable resources; narrow the selection or repair the inputs first");
         std::string error;
-        if (!archive.writeZip(selected, outputPath, layout, error)) {
-            std::cerr << "error: " << error << '\n';
-            return 1;
-        }
-        const std::size_t included = static_cast<std::size_t>(std::count_if(
-            selected.begin(), selected.end(), [&archive](std::size_t resourceIndex) {
-                return resourceIndex < archive.resources().size() &&
-                       archive.resources()[resourceIndex].extractable;
-            }));
-        std::cout << "Wrote " << outputPath.string() << " with " << included
-                  << " resource(s)";
-        if (included != selected.size()) {
-            std::cout << "; omitted " << (selected.size() - included)
-                      << " unavailable resource(s)";
-        }
-        std::cout << '\n';
+        if(!neobif::writeExportZip(items,outputPath,error,options))throw std::runtime_error(error);
+        std::cout<<"Wrote "<<outputPath.string()<<" with "<<items.size()<<" resources\n";
+        if(keepBoth)std::cout<<"Keep-both naming was explicitly requested.\n";
         return 0;
     }
-
-    const auto report = archive.extractResources(selected, outputPath, layout, overwrite);
+    auto report=neobif::extractExportItems(items,outputPath,options);
+    report.failed+=unavailable;
     std::cout << "Written: " << report.written << "\nSkipped: " << report.skipped
               << "\nFailed: " << report.failed << '\n';
     for (const std::string& message : report.messages) std::cerr << message << '\n';
-    return report.failed == 0u ? 0 : 1;
+    return report.cancelled ? 130 : (report.failed == 0u ? 0 : 1);
+}
+
+int main(int argc,char** argv) {
+    std::signal(SIGINT,cancelSignal);
+    try {return run(argc,argv);}
+    catch(const neobif::JobCancelled&) {std::cerr<<"Cancelled; completed files retained.\n";return 130;}
+    catch(const std::exception& ex) {std::cerr<<"error: "<<ex.what()<<'\n';return 1;}
 }

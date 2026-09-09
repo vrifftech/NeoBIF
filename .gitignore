@@ -53,3 +53,4 @@ Desktop.ini
 /build-wasm*/
 /dist-wasm/
 /.neo-wasm-deps/
+/.neo-deps/

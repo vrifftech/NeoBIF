@@ -1,4 +1,5 @@
 #include "core/KeyBifArchive.hpp"
+#include "core/ArchiveExport.hpp"
 
 #include <algorithm>
 #include <array>
@@ -35,8 +36,6 @@ constexpr std::size_t kYieldInterval = 4096u;
 constexpr std::size_t kMaximumReportedIssues = 10000u;
 constexpr std::size_t kMaximumCandidateReportedIssues = 256u;
 constexpr std::uint64_t kMaximumNativeKeyBytes = 128u * 1024u * 1024u;
-constexpr std::uint16_t kZipDosTime = 0x0000u;
-constexpr std::uint16_t kZipDosDate = 0x0021u; // 1980-01-01
 
 struct ResourceTypeName {
     std::uint16_t type;
@@ -174,69 +173,21 @@ std::optional<std::filesystem::path> resolveCaseInsensitive(
         if (!std::filesystem::is_directory(current, ec) || ec) return std::nullopt;
         const std::string wanted = lowerAscii(component.generic_string());
         bool found = false;
+        std::filesystem::path matched;
         for (std::filesystem::directory_iterator it(
                  current, std::filesystem::directory_options::skip_permission_denied, ec), end;
              !ec && it != end; it.increment(ec)) {
             if (lowerAscii(it->path().filename().generic_string()) == wanted) {
-                current = it->path();
+                if (found) return std::nullopt;
+                matched = it->path();
                 found = true;
-                break;
             }
         }
         if (!found) return std::nullopt;
+        current = matched;
     }
     if (!std::filesystem::is_regular_file(current, ec) || ec) return std::nullopt;
     return current;
-}
-
-bool hasUsableBifStructure(const std::filesystem::path& path) {
-    std::ifstream stream(path, std::ios::binary | std::ios::ate);
-    if (!stream) return false;
-    const std::streamoff length = stream.tellg();
-    if (length < static_cast<std::streamoff>(kBifHeaderSize)) return false;
-    stream.seekg(0, std::ios::beg);
-    std::array<std::uint8_t, kBifHeaderSize> header{};
-    stream.read(reinterpret_cast<char*>(header.data()),
-                static_cast<std::streamsize>(header.size()));
-    if (!stream || std::memcmp(header.data(), "BIFF", 4) != 0) return false;
-    if (std::memcmp(header.data() + 4, "V1  ", 4) != 0 &&
-        std::memcmp(header.data() + 4, "V1.0", 4) != 0) {
-        return false;
-    }
-    const std::uint32_t variableCount = readU32(header.data() + 8);
-    const std::uint32_t tableOffset = readU32(header.data() + 16);
-    if (variableCount > kMaximumTableRecords ||
-        !checkedRange(
-            tableOffset,
-            static_cast<std::uint64_t>(variableCount) * kBifVariableEntrySize,
-            static_cast<std::uint64_t>(length))) {
-        return false;
-    }
-
-    constexpr std::size_t kValidationChunkRecords = 4096u;
-    std::vector<std::uint8_t> bytes(kValidationChunkRecords * kBifVariableEntrySize);
-    std::uint32_t parsed = 0u;
-    while (parsed < variableCount) {
-        const std::uint32_t count = std::min<std::uint32_t>(
-            static_cast<std::uint32_t>(kValidationChunkRecords), variableCount - parsed);
-        const std::size_t byteCount = static_cast<std::size_t>(count) * kBifVariableEntrySize;
-        stream.seekg(static_cast<std::streamoff>(
-            static_cast<std::uint64_t>(tableOffset) +
-            static_cast<std::uint64_t>(parsed) * kBifVariableEntrySize), std::ios::beg);
-        stream.read(reinterpret_cast<char*>(bytes.data()),
-                    static_cast<std::streamsize>(byteCount));
-        if (!stream) return false;
-        for (std::uint32_t index = 0; index < count; ++index) {
-            const std::uint8_t* entry = bytes.data() +
-                static_cast<std::size_t>(index) * kBifVariableEntrySize;
-            if (!checkedRange(readU32(entry + 4), readU32(entry + 8),
-                              static_cast<std::uint64_t>(length))) {
-                return false;
-            }
-        }
-        parsed += count;
-    }
-    return true;
 }
 
 void appendUniquePath(std::vector<std::filesystem::path>& paths,
@@ -251,64 +202,20 @@ void appendUniquePath(std::vector<std::filesystem::path>& paths,
 }
 
 std::filesystem::path resolveBifPath(
-    const std::filesystem::path& keyPath,
-    const std::string& storedPath,
-    std::uint32_t declaredSize,
-    const std::vector<std::filesystem::path>& supplementaryFiles) {
-    const std::filesystem::path relative = portableRelativePath(storedPath);
-    const std::filesystem::path leafName = relative.filename();
-    const std::string relativeKey = pathKey(relative);
-    const std::string leafKey = pathKey(leafName);
-    std::vector<std::filesystem::path> explicitMatches;
-    std::vector<std::filesystem::path> automaticMatches;
-    std::vector<std::filesystem::path> sizeMatches;
-
-    // Newest explicit selection wins and explicit relocation outranks a stale
-    // KEY-relative file. Structurally valid candidates are preferred so a bad
-    // replacement cannot discard a working archive mapping.
-    for (auto it = supplementaryFiles.rbegin(); it != supplementaryFiles.rend(); ++it) {
-        const std::filesystem::path& file = *it;
+    const std::filesystem::path& keyPath, const std::string& storedPath,
+    std::uint32_t, const std::vector<std::filesystem::path>& supplementaryFiles) {
+    const auto relative = portableRelativePath(storedPath);
+    if (relative.empty()) return {};
+    if (auto direct = resolveCaseInsensitive(keyPath.parent_path(), relative)) return *direct;
+    std::vector<std::filesystem::path> matches;
+    if (auto local = resolveCaseInsensitive(keyPath.parent_path(), relative.filename())) appendUniquePath(matches, *local);
+    for (const auto& file : supplementaryFiles) {
         std::error_code ec;
-        if (!std::filesystem::is_regular_file(file, ec) || ec) continue;
-        const std::string fileKey = pathKey(file);
-        const std::string fileLeafKey = pathKey(file.filename());
-        if ((!relativeKey.empty() && fileKey == relativeKey) ||
-            (!leafKey.empty() && fileLeafKey == leafKey)) {
-            appendUniquePath(explicitMatches, file);
-            continue;
-        }
-        const std::uintmax_t size = std::filesystem::file_size(file, ec);
-        if (!ec && declaredSize != 0u && size == declaredSize) {
-            appendUniquePath(sizeMatches, file);
-        }
+        if (pathKey(file.filename()) == pathKey(relative.filename()) &&
+            std::filesystem::is_regular_file(file, ec) && !ec) appendUniquePath(matches, file);
     }
-
-    if (!relative.empty()) {
-        const std::filesystem::path direct = keyPath.parent_path() / relative;
-        std::error_code ec;
-        if (std::filesystem::is_regular_file(direct, ec) && !ec) {
-            appendUniquePath(automaticMatches, direct);
-        }
-        if (auto resolved = resolveCaseInsensitive(keyPath.parent_path(), relative)) {
-            appendUniquePath(automaticMatches, *resolved);
-        }
-    }
-    if (!leafName.empty()) {
-        const std::filesystem::path direct = keyPath.parent_path() / leafName;
-        std::error_code ec;
-        if (std::filesystem::is_regular_file(direct, ec) && !ec) {
-            appendUniquePath(automaticMatches, direct);
-        }
-    }
-
-    std::vector<std::filesystem::path> candidates;
-    for (const auto& path : explicitMatches) appendUniquePath(candidates, path);
-    for (const auto& path : automaticMatches) appendUniquePath(candidates, path);
-    if (sizeMatches.size() == 1u) appendUniquePath(candidates, sizeMatches.front());
-    for (const auto& path : candidates) {
-        if (hasUsableBifStructure(path)) return path;
-    }
-    return candidates.empty() ? std::filesystem::path{} : candidates.front();
+    // Multiple same-name candidates need an explicit KEY-entry-to-file mapping.
+    return matches.size() == 1u ? matches.front() : std::filesystem::path{};
 }
 
 std::string sanitizeComponent(std::string value) {
@@ -359,137 +266,15 @@ std::filesystem::path relativeOutputPath(const ResourceInfo& resource,
 }
 
 std::vector<std::filesystem::path> uniqueOutputPaths(
-    const std::vector<std::size_t>& indices,
-    const std::vector<ResourceInfo>& resources,
-    const std::vector<BifInfo>& bifs,
-    ExtractionLayout layout) {
+    const std::vector<std::size_t>& indices, const std::vector<ResourceInfo>& resources,
+    const std::vector<BifInfo>& bifs, ExtractionLayout layout) {
     std::vector<std::filesystem::path> result;
-    result.reserve(indices.size());
-    std::unordered_set<std::string> used;
-    for (const std::size_t index : indices) {
-        if (index >= resources.size()) {
-            result.emplace_back();
-            continue;
-        }
-        const ResourceInfo& resource = resources[index];
-        if (resource.bifIndex >= bifs.size()) {
-            result.emplace_back();
-            continue;
-        }
-        std::filesystem::path candidate = relativeOutputPath(resource, bifs[resource.bifIndex], layout);
-        std::string key = lowerAscii(candidate.generic_string());
-        if (used.insert(key).second) {
-            result.push_back(candidate);
-            continue;
-        }
-
-        const std::string suffix = "__" + hexResourceId(resource.resourceId).substr(2);
-        const std::filesystem::path parent = candidate.parent_path();
-        const std::string stem = candidate.stem().string();
-        const std::string extension = candidate.extension().string();
-        candidate = parent / (stem + suffix + extension);
-        key = lowerAscii(candidate.generic_string());
-        unsigned ordinal = 2u;
-        while (!used.insert(key).second) {
-            candidate = parent / (stem + suffix + "_" + std::to_string(ordinal++) + extension);
-            key = lowerAscii(candidate.generic_string());
-        }
-        result.push_back(candidate);
+    for (auto index : indices) {
+        if (index >= resources.size() || resources[index].bifIndex >= bifs.size()) result.emplace_back();
+        else result.push_back(relativeOutputPath(resources[index], bifs[resources[index].bifIndex], layout));
     }
     return result;
 }
-
-bool writeAtomic(const std::filesystem::path& output,
-                 const std::vector<std::uint8_t>& bytes,
-                 bool overwrite,
-                 std::string& error) {
-    std::error_code ec;
-    if (!overwrite && std::filesystem::exists(output, ec) && !ec) {
-        error = "Output already exists";
-        return false;
-    }
-    std::filesystem::create_directories(output.parent_path(), ec);
-    if (ec) {
-        error = "Unable to create output directory: " + ec.message();
-        return false;
-    }
-    const std::filesystem::path temporary = output.parent_path() /
-        ("." + output.filename().string() + ".neobif.tmp");
-    std::filesystem::remove(temporary, ec);
-    ec.clear();
-    {
-        std::ofstream stream(temporary, std::ios::binary | std::ios::trunc);
-        if (!stream) {
-            error = "Unable to create temporary output";
-            return false;
-        }
-        if (!bytes.empty()) {
-            stream.write(reinterpret_cast<const char*>(bytes.data()),
-                         static_cast<std::streamsize>(bytes.size()));
-        }
-        stream.flush();
-        if (!stream) {
-            error = "Unable to write output bytes";
-            stream.close();
-            std::filesystem::remove(temporary, ec);
-            return false;
-        }
-    }
-    if (overwrite) {
-        std::filesystem::remove(output, ec);
-        ec.clear();
-    }
-    std::filesystem::rename(temporary, output, ec);
-    if (ec) {
-        error = "Unable to finalize output: " + ec.message();
-        std::filesystem::remove(temporary, ec);
-        return false;
-    }
-    return true;
-}
-
-std::uint32_t crc32(const std::uint8_t* data, std::size_t size) {
-    static const std::array<std::uint32_t, 256> table = [] {
-        std::array<std::uint32_t, 256> values{};
-        for (std::uint32_t i = 0; i < values.size(); ++i) {
-            std::uint32_t value = i;
-            for (int bit = 0; bit < 8; ++bit) {
-                value = (value & 1u) ? (0xEDB88320u ^ (value >> 1u)) : (value >> 1u);
-            }
-            values[i] = value;
-        }
-        return values;
-    }();
-
-    std::uint32_t value = 0xFFFFFFFFu;
-    for (std::size_t i = 0; i < size; ++i) {
-        value = table[(value ^ data[i]) & 0xFFu] ^ (value >> 8u);
-    }
-    return value ^ 0xFFFFFFFFu;
-}
-
-void writeU16(std::ostream& stream, std::uint16_t value) {
-    const char bytes[2] = {
-        static_cast<char>(value & 0xFFu),
-        static_cast<char>((value >> 8u) & 0xFFu)};
-    stream.write(bytes, 2);
-}
-
-void writeU32(std::ostream& stream, std::uint32_t value) {
-    const char bytes[4] = {
-        static_cast<char>(value & 0xFFu),
-        static_cast<char>((value >> 8u) & 0xFFu),
-        static_cast<char>((value >> 16u) & 0xFFu),
-        static_cast<char>((value >> 24u) & 0xFFu)};
-    stream.write(bytes, 4);
-}
-
-struct ZipCentralEntry {
-    std::string name;
-    std::uint32_t crc{};
-    std::uint32_t size{};
-    std::uint32_t localOffset{};
-};
 
 std::string joinStatus(const std::vector<std::string>& parts) {
     std::ostringstream stream;
@@ -567,7 +352,7 @@ bool buildResourceIndex(const std::vector<KeyEntry>& keyEntries,
                 resource.offset = selected->offset;
                 resource.size = selected->size;
                 resource.boundsValid = selected->boundsValid;
-                resource.extractable = bif.available && bif.valid && resource.boundsValid;
+                resource.extractable = bif.available && bif.valid && resource.boundsValid && resource.typeMatches;
                 referencedIds[resource.bifIndex].insert(selected->id);
                 if (selectedIndex && *selectedIndex != resource.tableIndex) {
                     status.push_back("Resource ID was located at BIF table index " +
@@ -577,8 +362,11 @@ bool buildResourceIndex(const std::vector<KeyEntry>& keyEntries,
                     appendArchiveIssue(issues, {IssueSeverity::Warning, status.back(),
                                       resource.bifIndex, key.id});
                 }
-                if (!resource.typeMatches) status.push_back("BIF type does not match KEY type");
-                if (!resource.boundsValid) status.push_back("Payload lies outside BIF bounds");
+                if (!resource.typeMatches) {
+                    status.push_back("Inconsistent BIF/KEY resource type; ordinary extraction disabled");
+                    appendArchiveIssue(issues, {IssueSeverity::Error, status.back(), resource.bifIndex, key.id});
+                }
+                if (!resource.boundsValid) status.push_back("Payload overlaps BIF header/tables or lies outside BIF bounds");
             } else if (!bif.available) {
                 status.push_back("BIF file is missing");
             } else {
@@ -664,6 +452,12 @@ std::string resourceTypeExtension(std::uint16_t type) {
     return stream.str();
 }
 
+bool isKnownResourceExtension(const std::string& extension) {
+    const auto value = lowerAscii(extension);
+    return std::any_of(std::begin(kKotORResourceTypes), std::end(kKotORResourceTypes),
+        [&value](const ResourceTypeName& entry) { return value == entry.extension; });
+}
+
 std::string resourceTypeLabel(std::uint16_t type) {
     std::ostringstream stream;
     stream << resourceTypeExtension(type) << " (0x" << std::uppercase << std::hex
@@ -709,6 +503,7 @@ std::string ResourceInfo::fileName() const {
 
 void KeyBifArchive::clear() {
     keyPath_.clear();
+    keySnapshot_ = {};
     buildYear_ = 0;
     buildDay_ = 0;
     bifs_.clear();
@@ -719,9 +514,14 @@ void KeyBifArchive::clear() {
 }
 
 bool KeyBifArchive::open(const std::filesystem::path& keyPath,
-                         const std::vector<std::filesystem::path>& supplementaryFiles) {
+                         const std::vector<std::filesystem::path>& supplementaryFiles,
+                         const std::map<std::size_t, std::filesystem::path>& explicitRelocations,
+                         const JobControl& job) {
     clear();
-    keyPath_ = keyPath;
+    keyPath_ = std::filesystem::absolute(keyPath).lexically_normal();
+    job.check();
+    try { keySnapshot_ = neoshared::erf::capture_regular_file_identity(keyPath_); }
+    catch (const std::exception& ex) { lastError_ = ex.what(); return false; }
 
     std::ifstream keyStream(keyPath, std::ios::binary | std::ios::ate);
     if (!keyStream) {
@@ -801,8 +601,14 @@ bool KeyBifArchive::open(const std::filesystem::path& keyPath,
             while (actualLength < nameLength && nameBytes[actualLength] != 0u) ++actualLength;
             bif.storedPath.assign(reinterpret_cast<const char*>(nameBytes), actualLength);
         }
-        bif.resolvedPath = resolveBifPath(
-            keyPath, bif.storedPath, bif.declaredFileSize, supplementaryFiles);
+        const auto chosen = explicitRelocations.find(i);
+        bif.resolvedPath = chosen != explicitRelocations.end()
+            ? std::filesystem::absolute(chosen->second).lexically_normal()
+            : resolveBifPath(keyPath_, bif.storedPath, bif.declaredFileSize, supplementaryFiles);
+        if (chosen != explicitRelocations.end()) {
+            bif.messages.push_back("BIF explicitly mapped by the user: " + bif.resolvedPath.string());
+            appendArchiveIssue(issues_, {IssueSeverity::Warning, bif.messages.back(), i, std::nullopt});
+        }
         bifs_.push_back(std::move(bif));
     }
 
@@ -822,10 +628,17 @@ bool KeyBifArchive::open(const std::filesystem::path& keyPath,
     std::vector<ParsedBif> parsedBifs(bifs_.size());
     std::uint64_t aggregateBifRecords = 0;
     for (std::size_t bifIndex = 0; bifIndex < bifs_.size(); ++bifIndex) {
+        job.update(bifIndex, bifs_.size(), "Indexing BIF archives");
         BifInfo& bif = bifs_[bifIndex];
         if (bif.resolvedPath.empty()) {
-            bif.messages.push_back("Referenced BIF file was not found");
+            bif.messages.push_back("Referenced BIF is missing or ambiguous; use Relocate BIF to select the exact KEY entry and file");
             appendArchiveIssue(issues_, {IssueSeverity::Error, bif.messages.back(), bifIndex, std::nullopt});
+            continue;
+        }
+        try { bif.snapshot = neoshared::erf::capture_regular_file_identity(bif.resolvedPath); }
+        catch (const std::exception& ex) {
+            bif.messages.push_back(ex.what());
+            appendArchiveIssue(issues_, {IssueSeverity::Error, ex.what(), bifIndex, std::nullopt});
             continue;
         }
         std::ifstream stream(bif.resolvedPath, std::ios::binary | std::ios::ate);
@@ -866,7 +679,7 @@ bool KeyBifArchive::open(const std::filesystem::path& keyPath,
         bif.variableResourceCount = readU32(header.data() + 8);
         bif.fixedResourceCount = readU32(header.data() + 12);
         bif.tableOffset = readU32(header.data() + 16);
-        if (bif.variableResourceCount > kMaximumTableRecords) {
+        if (bif.variableResourceCount > kMaximumTableRecords || bif.fixedResourceCount > kMaximumTableRecords) {
             bif.messages.push_back("Variable resource count exceeds safe limit");
             appendArchiveIssue(issues_, {IssueSeverity::Error, bif.messages.back(), bifIndex, std::nullopt});
             continue;
@@ -877,9 +690,9 @@ bool KeyBifArchive::open(const std::filesystem::path& keyPath,
             return false;
         }
         aggregateBifRecords += bif.variableResourceCount;
-        if (!checkedRange(bif.tableOffset,
+        if (bif.tableOffset < kBifHeaderSize || !checkedRange(bif.tableOffset,
                           static_cast<std::uint64_t>(bif.variableResourceCount) *
-                              kBifVariableEntrySize,
+                              kBifVariableEntrySize + static_cast<std::uint64_t>(bif.fixedResourceCount) * 20u,
                           bif.actualFileSize)) {
             bif.messages.push_back("Variable resource table extends beyond the BIF file");
             appendArchiveIssue(issues_, {IssueSeverity::Error, bif.messages.back(), bifIndex, std::nullopt});
@@ -894,6 +707,7 @@ bool KeyBifArchive::open(const std::filesystem::path& keyPath,
         parsed.entries.reserve(bif.variableResourceCount);
         stream.seekg(static_cast<std::streamoff>(bif.tableOffset), std::ios::beg);
         for (std::uint32_t entryIndex = 0; entryIndex < bif.variableResourceCount; ++entryIndex) {
+            if (entryIndex % kYieldInterval == 0u) job.check();
             std::array<std::uint8_t, kBifVariableEntrySize> raw{};
             stream.read(reinterpret_cast<char*>(raw.data()), static_cast<std::streamsize>(raw.size()));
             if (!stream) {
@@ -907,10 +721,14 @@ bool KeyBifArchive::open(const std::filesystem::path& keyPath,
             entry.offset = readU32(raw.data() + 4);
             entry.size = readU32(raw.data() + 8);
             entry.type = readU32(raw.data() + 12);
-            entry.boundsValid = checkedRange(entry.offset, entry.size, bif.actualFileSize);
+            const std::uint64_t payloadStart = bif.tableOffset +
+                static_cast<std::uint64_t>(bif.variableResourceCount) * kBifVariableEntrySize +
+                static_cast<std::uint64_t>(bif.fixedResourceCount) * 20u;
+            entry.boundsValid = checkedRange(entry.offset, entry.size, bif.actualFileSize) &&
+                (entry.size == 0u || entry.offset >= payloadStart);
             if (!entry.boundsValid) {
                 appendArchiveIssue(issues_, {IssueSeverity::Error,
-                                   "BIF resource payload extends beyond the file",
+                                   "BIF resource overlaps the header/tables or extends beyond the file",
                                    bifIndex,
                                    entry.id});
             }
@@ -925,7 +743,11 @@ bool KeyBifArchive::open(const std::filesystem::path& keyPath,
         bif.valid = parsed.entries.size() == bif.variableResourceCount;
     }
 
-    if (!buildResourceIndex(keyEntries, parsedBifs, bifs_, resources_, issues_, lastError_)) {
+    if (!unchangedInput(keyPath_, keySnapshot_)) { lastError_ = "KEY changed while indexing; rescan"; return false; }
+    for (const auto& bif : bifs_) if (bif.available && !unchangedInput(bif.resolvedPath, bif.snapshot)) {
+        lastError_ = "BIF changed while indexing; rescan: " + bif.resolvedPath.string(); return false;
+    }
+    if (!buildResourceIndex(keyEntries, parsedBifs, bifs_, resources_, issues_, lastError_, [&job] { job.check(); })) {
         return false;
     }
 
@@ -1139,7 +961,7 @@ bool KeyBifArchive::openBrowser(const BrowserArchiveFile& keyFile,
         candidate.variableCount = readU32(header.data() + 8);
         candidate.fixedCount = readU32(header.data() + 12);
         candidate.tableOffset = readU32(header.data() + 16);
-        if (candidate.variableCount > kMaximumTableRecords) {
+        if (candidate.variableCount > kMaximumTableRecords || candidate.fixedCount > kMaximumTableRecords) {
             appendCandidateIssue(candidate, {IssueSeverity::Error,
                 "Variable resource count exceeds safe limit", std::nullopt});
             candidates.push_back(std::move(candidate));
@@ -1153,7 +975,7 @@ bool KeyBifArchive::openBrowser(const BrowserArchiveFile& keyFile,
         aggregateCandidateRecords += candidate.variableCount;
         const std::uint64_t tableLength =
             static_cast<std::uint64_t>(candidate.variableCount) * kBifVariableEntrySize;
-        if (!checkedRange(candidate.tableOffset, tableLength, file.size)) {
+        if (candidate.tableOffset < kBifHeaderSize || !checkedRange(candidate.tableOffset, tableLength + static_cast<std::uint64_t>(candidate.fixedCount) * 20u, file.size)) {
             appendCandidateIssue(candidate, {IssueSeverity::Error,
                 "Variable resource table extends beyond the BIF file", std::nullopt});
             candidates.push_back(std::move(candidate));
@@ -1198,11 +1020,12 @@ bool KeyBifArchive::openBrowser(const BrowserArchiveFile& keyFile,
                 entry.offset = readU32(raw + 4);
                 entry.size = readU32(raw + 8);
                 entry.type = readU32(raw + 12);
-                entry.boundsValid = checkedRange(entry.offset, entry.size, file.size);
+                entry.boundsValid = checkedRange(entry.offset, entry.size, file.size) &&
+                    (entry.size == 0u || entry.offset >= candidate.tableOffset + tableLength + static_cast<std::uint64_t>(candidate.fixedCount) * 20u);
                 if (!entry.boundsValid) {
                     payloadBoundsValid = false;
                     appendCandidateIssue(candidate, {IssueSeverity::Error,
-                        "BIF resource payload extends beyond the file", entry.id});
+                        "BIF resource overlaps the header/tables or extends beyond the file", entry.id});
                 }
                 if (!candidate.parsed.idToIndex.emplace(
                         entry.id, candidate.parsed.entries.size()).second) {
@@ -1232,9 +1055,6 @@ bool KeyBifArchive::openBrowser(const BrowserArchiveFile& keyFile,
         const std::string expectedKey = pathKey(expected);
         const std::string storedKey = pathKey(stored);
         const std::string leafKey = pathKey(stored.filename());
-        const std::string storedStem = lowerAscii(stored.stem().string());
-        const std::string storedExtension = lowerAscii(stored.extension().string());
-
         int bestScore = 0;
         int bestIdentityRank = -1;
         int bestSafetyRank = -1;
@@ -1250,25 +1070,11 @@ bool KeyBifArchive::openBrowser(const BrowserArchiveFile& keyFile,
             if (!expectedKey.empty() && candidateKey == expectedKey) identityScore += 10000;
             if (!storedKey.empty() && candidateKey == storedKey) identityScore += 9000;
             if (!leafKey.empty() && candidateLeaf == leafKey) identityScore += 5000;
-            const std::string candidateStem = lowerAscii(candidatePath.stem().string());
-            const std::string candidateExtension = lowerAscii(candidatePath.extension().string());
-            if (!storedStem.empty() && candidateExtension == storedExtension &&
-                candidateStem.size() > storedStem.size() &&
-                candidateStem.compare(0, storedStem.size(), storedStem) == 0 &&
-                candidateStem[storedStem.size()] == '(') {
-                identityScore += 4000;
+            if (candidate.file.explicitBifIndex) {
+                identityScore = *candidate.file.explicitBifIndex == bifIndex ? 100000 : 0;
             }
-            if (candidate.embeddedBifIndex && *candidate.embeddedBifIndex == bifIndex) {
-                identityScore += 3000;
-            }
-            int score = identityScore;
-            if (bif.declaredFileSize != 0u && candidate.file.size == bif.declaredFileSize) {
-                score += 1000;
-            }
-            // A BIF explicitly added through "Add or Relocate" should replace
-            // an older match when it has an archive identity signal of its own.
-            // Do not boost a file that matches by size alone.
-            if (candidate.file.preferred && identityScore >= 3000) score += 50000;
+            if (identityScore == 0) continue;
+            const int score = identityScore;
             const int identityRank = identityScore != 0 ? 1 : 0;
             const int safetyRank = candidate.replacementSafe ? 2 : (candidate.valid ? 1 : 0);
             // Archive validity is the primary ordering criterion.  An exact
@@ -1277,10 +1083,8 @@ bool KeyBifArchive::openBrowser(const BrowserArchiveFile& keyFile,
             // replacement preference are considered only among candidates at
             // the same safety level.
             if (score != 0 &&
-                (safetyRank > bestSafetyRank ||
-                 (safetyRank == bestSafetyRank && identityRank > bestIdentityRank) ||
-                 (safetyRank == bestSafetyRank && identityRank == bestIdentityRank &&
-                  score > bestScore))) {
+                (score > bestScore ||
+                 (score == bestScore && safetyRank > bestSafetyRank))) {
                 bestIdentityRank = identityRank;
                 bestSafetyRank = safetyRank;
                 bestScore = score;
@@ -1295,7 +1099,7 @@ bool KeyBifArchive::openBrowser(const BrowserArchiveFile& keyFile,
         if (!bestCandidate || bestScore == 0 || tied) {
             bif.messages.push_back(tied
                 ? "Referenced BIF file matched multiple selected browser files"
-                : "Referenced BIF file was not found");
+                : "Referenced BIF is missing or ambiguous; use Relocate BIF to select the exact KEY entry and file");
             appendArchiveIssue(issues_, {IssueSeverity::Error, bif.messages.back(), bifIndex, std::nullopt});
             continue;
         }
@@ -1348,253 +1152,67 @@ std::size_t KeyBifArchive::missingBifCount() const noexcept {
         [](const BifInfo& bif) { return !bif.available; }));
 }
 
-bool KeyBifArchive::readResource(std::size_t resourceIndex,
-                                 std::vector<std::uint8_t>& bytes,
-                                 std::string& error) const {
+bool KeyBifArchive::streamResource(std::size_t index, const ByteSink& sink,
+                                  std::string& error, const JobControl& job) const {
+    error.clear();
+    if (index >= resources_.size()) { error="Resource index is out of range"; return false; }
+    const auto& resource=resources_[index];
+    if (!resource.extractable || resource.bifIndex>=bifs_.size()) {
+        error="Resource is not extractable: "+resource.status;return false;
+    }
+    const auto& bif=bifs_[resource.bifIndex];
+    if (bif.browserBacked) { error="Use retained browser range access";return false; }
+    if (!unchangedInput(keyPath_,keySnapshot_)) { error="KEY changed after indexing; rescan before extracting";return false; }
+    if (!streamInputRange(bif.resolvedPath,bif.snapshot,resource.offset,resource.size,sink,error,job))return false;
+    if (!unchangedInput(keyPath_,keySnapshot_)) { error="KEY changed during extraction; rescan";return false; }
+    return true;
+}
+bool KeyBifArchive::readResource(std::size_t index, std::vector<std::uint8_t>& bytes, std::string& error) const {
     bytes.clear();
-    error.clear();
-    if (resourceIndex >= resources_.size()) {
-        error = "Resource index is out of range";
-        return false;
-    }
-    const ResourceInfo& resource = resources_[resourceIndex];
-    if (!resource.extractable || resource.bifIndex >= bifs_.size()) {
-        error = "Resource is not extractable: " + resource.status;
-        return false;
-    }
-    const BifInfo& bif = bifs_[resource.bifIndex];
-    if (bif.browserBacked) {
-        error = "Browser-backed resources must be exported through retained range access";
-        return false;
-    }
-    std::ifstream stream(bif.resolvedPath, std::ios::binary);
-    if (!stream) {
-        error = "Unable to reopen BIF file: " + bif.resolvedPath.string();
-        return false;
-    }
-    stream.seekg(static_cast<std::streamoff>(resource.offset), std::ios::beg);
-    if (!stream) {
-        error = "Unable to seek to resource payload";
-        return false;
-    }
-    bytes.resize(resource.size);
-    if (!bytes.empty()) {
-        stream.read(reinterpret_cast<char*>(bytes.data()),
-                    static_cast<std::streamsize>(bytes.size()));
-        if (!stream) {
-            bytes.clear();
-            error = "Unable to read complete resource payload";
-            return false;
-        }
-    }
-    return true;
+    const bool ok=streamResource(index,[&](const std::uint8_t* data,std::size_t size,std::string&) {
+        bytes.insert(bytes.end(),data,data+size);return true;
+    },error);
+    if(!ok) bytes.clear();
+    return ok;
 }
-
-ExtractionReport KeyBifArchive::extractResources(
-    const std::vector<std::size_t>& resourceIndices,
-    const std::filesystem::path& outputDirectory,
-    ExtractionLayout layout,
-    bool overwrite) const {
-    ExtractionReport report;
-    const auto paths = uniqueOutputPaths(resourceIndices, resources_, bifs_, layout);
-    for (std::size_t position = 0; position < resourceIndices.size(); ++position) {
-        const std::size_t index = resourceIndices[position];
-        if (index >= resources_.size() || position >= paths.size() || paths[position].empty()) {
-            ++report.failed;
-            report.messages.push_back("Invalid resource selection");
-            continue;
-        }
-        const ResourceInfo& resource = resources_[index];
-        if (!resource.extractable) {
-            ++report.skipped;
-            report.messages.push_back(resource.fileName() + ": " + resource.status);
-            continue;
-        }
-        const std::filesystem::path output = outputDirectory / paths[position];
-        std::error_code ec;
-        if (!overwrite && std::filesystem::exists(output, ec) && !ec) {
-            ++report.skipped;
-            report.messages.push_back(output.string() + ": already exists");
-            continue;
-        }
-        std::vector<std::uint8_t> bytes;
-        std::string error;
-        if (!readResource(index, bytes, error) || !writeAtomic(output, bytes, overwrite, error)) {
-            ++report.failed;
-            report.messages.push_back(resource.fileName() + ": " + error);
-            continue;
-        }
-        ++report.written;
-    }
-    return report;
+std::vector<std::filesystem::path> KeyBifArchive::inputPaths() const {
+    std::vector<std::filesystem::path> paths{keyPath_};
+    for(const auto& bif:bifs_)if(!bif.resolvedPath.empty())paths.push_back(bif.resolvedPath);
+    return paths;
 }
-
-std::vector<std::filesystem::path> KeyBifArchive::outputPaths(
-    const std::vector<std::size_t>& resourceIndices,
-    ExtractionLayout layout) const {
-    return uniqueOutputPaths(resourceIndices, resources_, bifs_, layout);
+namespace {
+std::vector<ExportItem> bifExportItems(const KeyBifArchive& archive,const std::vector<std::size_t>& indices,ExtractionLayout layout) {
+    const auto paths=archive.outputPaths(indices,layout);std::vector<ExportItem> items;
+    for(std::size_t pos=0;pos<indices.size();++pos) {
+        const auto index=indices[pos];ExportItem item;
+        item.relativePath=paths[pos];item.sourcePaths.push_back(archive.keyPath());
+        if(index<archive.resources().size()) {
+            item.displayName=archive.resources()[index].fileName();item.expectedSize=archive.resources()[index].size;
+            if(archive.resources()[index].bifIndex<archive.bifs().size())item.sourcePaths.push_back(archive.bifs()[archive.resources()[index].bifIndex].resolvedPath);
+        }
+        item.stream=[&archive,index](const ByteSink& sink,std::string& error,const JobControl& job) {return archive.streamResource(index,sink,error,job);};
+        items.push_back(std::move(item));
+    }
+    return items;
 }
-
-bool KeyBifArchive::writeZip(const std::vector<std::size_t>& resourceIndices,
-                             const std::filesystem::path& outputPath,
-                             ExtractionLayout layout,
-                             std::string& error) const {
-    error.clear();
-    std::vector<std::size_t> extractable;
-    extractable.reserve(resourceIndices.size());
-    for (const std::size_t index : resourceIndices) {
-        if (index < resources_.size() && resources_[index].extractable) {
-            extractable.push_back(index);
-        }
-    }
-    if (extractable.empty()) {
-        error = "No extractable resources were selected";
-        return false;
-    }
-    if (extractable.size() > std::numeric_limits<std::uint16_t>::max()) {
-        error = "ZIP output would exceed the classic ZIP entry limit";
-        return false;
-    }
-
-    const auto paths = uniqueOutputPaths(extractable, resources_, bifs_, layout);
-    std::error_code ec;
-    if (!outputPath.parent_path().empty()) {
-        std::filesystem::create_directories(outputPath.parent_path(), ec);
-    }
-    if (ec) {
-        error = "Unable to create ZIP output directory: " + ec.message();
-        return false;
-    }
-    const std::filesystem::path temporary = outputPath.parent_path() /
-        ("." + outputPath.filename().string() + ".neobif.tmp");
-    std::filesystem::remove(temporary, ec);
-
-    std::ofstream stream(temporary, std::ios::binary | std::ios::trunc);
-    if (!stream) {
-        error = "Unable to create ZIP output";
-        return false;
-    }
-    std::vector<ZipCentralEntry> central;
-    central.reserve(extractable.size());
-
-    for (std::size_t position = 0; position < extractable.size(); ++position) {
-        const std::size_t index = extractable[position];
-        std::vector<std::uint8_t> bytes;
-        if (!readResource(index, bytes, error)) {
-            stream.close();
-            std::filesystem::remove(temporary, ec);
-            return false;
-        }
-        std::string name = paths[position].generic_string();
-        if (name.size() > std::numeric_limits<std::uint16_t>::max()) {
-            error = "ZIP entry name is too long";
-            stream.close();
-            std::filesystem::remove(temporary, ec);
-            return false;
-        }
-        const std::streamoff offset = stream.tellp();
-        if (offset < 0 || static_cast<std::uint64_t>(offset) >
-                              std::numeric_limits<std::uint32_t>::max()) {
-            error = "ZIP output exceeds the classic ZIP size limit";
-            stream.close();
-            std::filesystem::remove(temporary, ec);
-            return false;
-        }
-        const std::uint32_t checksum = crc32(bytes.data(), bytes.size());
-        writeU32(stream, 0x04034B50u);
-        writeU16(stream, 20u);
-        writeU16(stream, 0x0800u);
-        writeU16(stream, 0u);
-        writeU16(stream, kZipDosTime);
-        writeU16(stream, kZipDosDate);
-        writeU32(stream, checksum);
-        writeU32(stream, static_cast<std::uint32_t>(bytes.size()));
-        writeU32(stream, static_cast<std::uint32_t>(bytes.size()));
-        writeU16(stream, static_cast<std::uint16_t>(name.size()));
-        writeU16(stream, 0u);
-        stream.write(name.data(), static_cast<std::streamsize>(name.size()));
-        if (!bytes.empty()) {
-            stream.write(reinterpret_cast<const char*>(bytes.data()),
-                         static_cast<std::streamsize>(bytes.size()));
-        }
-        if (!stream) {
-            error = "Unable to write ZIP payload";
-            stream.close();
-            std::filesystem::remove(temporary, ec);
-            return false;
-        }
-        central.push_back({name, checksum, static_cast<std::uint32_t>(bytes.size()),
-                           static_cast<std::uint32_t>(offset)});
-    }
-
-    const std::streamoff centralOffsetRaw = stream.tellp();
-    if (centralOffsetRaw < 0 || static_cast<std::uint64_t>(centralOffsetRaw) >
-                                    std::numeric_limits<std::uint32_t>::max()) {
-        error = "ZIP central directory exceeds the classic ZIP size limit";
-        stream.close();
-        std::filesystem::remove(temporary, ec);
-        return false;
-    }
-    const std::uint32_t centralOffset = static_cast<std::uint32_t>(centralOffsetRaw);
-    for (const ZipCentralEntry& entry : central) {
-        writeU32(stream, 0x02014B50u);
-        writeU16(stream, 20u);
-        writeU16(stream, 20u);
-        writeU16(stream, 0x0800u);
-        writeU16(stream, 0u);
-        writeU16(stream, kZipDosTime);
-        writeU16(stream, kZipDosDate);
-        writeU32(stream, entry.crc);
-        writeU32(stream, entry.size);
-        writeU32(stream, entry.size);
-        writeU16(stream, static_cast<std::uint16_t>(entry.name.size()));
-        writeU16(stream, 0u);
-        writeU16(stream, 0u);
-        writeU16(stream, 0u);
-        writeU16(stream, 0u);
-        writeU32(stream, 0u);
-        writeU32(stream, entry.localOffset);
-        stream.write(entry.name.data(), static_cast<std::streamsize>(entry.name.size()));
-    }
-    const std::streamoff endOffsetRaw = stream.tellp();
-    if (endOffsetRaw < 0 || endOffsetRaw - centralOffsetRaw >
-                                static_cast<std::streamoff>(std::numeric_limits<std::uint32_t>::max())) {
-        error = "ZIP central directory is too large";
-        stream.close();
-        std::filesystem::remove(temporary, ec);
-        return false;
-    }
-    const std::uint32_t centralSize = static_cast<std::uint32_t>(endOffsetRaw - centralOffsetRaw);
-    writeU32(stream, 0x06054B50u);
-    writeU16(stream, 0u);
-    writeU16(stream, 0u);
-    writeU16(stream, static_cast<std::uint16_t>(central.size()));
-    writeU16(stream, static_cast<std::uint16_t>(central.size()));
-    writeU32(stream, centralSize);
-    writeU32(stream, centralOffset);
-    writeU16(stream, 0u);
-    stream.flush();
-    if (!stream) {
-        error = "Unable to finalize ZIP output";
-        stream.close();
-        std::filesystem::remove(temporary, ec);
-        return false;
-    }
-    stream.close();
-    std::filesystem::remove(outputPath, ec);
-    ec.clear();
-    std::filesystem::rename(temporary, outputPath, ec);
-    if (ec) {
-        error = "Unable to finalize ZIP file: " + ec.message();
-        std::filesystem::remove(temporary, ec);
-        return false;
-    }
-    return true;
+}
+ExtractionReport KeyBifArchive::extractResources(const std::vector<std::size_t>& indices,
+    const std::filesystem::path& root,ExtractionLayout layout,bool overwrite) const {
+    ExportOptions options;options.protectedInputs=inputPaths();options.existing=overwrite?ExistingPolicy::Replace:ExistingPolicy::Skip;
+    return extractExportItems(bifExportItems(*this,indices,layout),root,options);
+}
+std::vector<std::filesystem::path> KeyBifArchive::outputPaths(const std::vector<std::size_t>& indices,ExtractionLayout layout) const {
+    return uniqueOutputPaths(indices,resources_,bifs_,layout);
+}
+bool KeyBifArchive::writeZip(const std::vector<std::size_t>& indices,const std::filesystem::path& path,
+                             ExtractionLayout layout,std::string& error) const {
+    ExportOptions options;options.protectedInputs=inputPaths();
+    return writeExportZip(bifExportItems(*this,indices,layout),path,error,options);
 }
 
 std::vector<std::filesystem::path> KeyBifArchive::scanForKeyFiles(
     const std::filesystem::path& root,
-    std::size_t maximumResults) {
+    std::size_t maximumResults, const JobControl& job) {
     std::vector<std::filesystem::path> results;
     std::error_code ec;
     if (std::filesystem::is_regular_file(root, ec) && !ec) {
@@ -1610,6 +1228,7 @@ std::vector<std::filesystem::path> KeyBifArchive::scanForKeyFiles(
     for (std::filesystem::recursive_directory_iterator it(
              root, std::filesystem::directory_options::skip_permission_denied, ec), end;
          !ec && it != end && results.size() < maximumResults; it.increment(ec)) {
+        job.check();
         if (!it->is_regular_file(ec) || ec) {
             ec.clear();
             continue;

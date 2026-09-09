@@ -1,5 +1,7 @@
 #pragma once
 
+#include "core/InputSnapshot.hpp"
+#include <map>
 #include <cstddef>
 #include <cstdint>
 #include <filesystem>
@@ -30,6 +32,7 @@ struct BifInfo {
     std::uint16_t driveFlags{};
     std::filesystem::path resolvedPath;
     std::uintmax_t actualFileSize{};
+    InputSnapshot snapshot;
     bool browserBacked{};
     std::uint32_t browserSessionId{};
     std::uint32_t browserFileId{};
@@ -76,6 +79,7 @@ struct ExtractionReport {
     std::size_t written{};
     std::size_t skipped{};
     std::size_t failed{};
+    bool cancelled{};
     std::vector<std::string> messages;
 };
 
@@ -85,6 +89,7 @@ struct BrowserArchiveFile {
     std::string relativePath;
     std::uint64_t size{};
     bool preferred{};
+    std::optional<std::size_t> explicitBifIndex;
 };
 
 using BrowserRangeReader = std::function<bool(
@@ -99,7 +104,9 @@ using BrowserYieldCallback = std::function<void()>;
 class KeyBifArchive final {
 public:
     bool open(const std::filesystem::path& keyPath,
-              const std::vector<std::filesystem::path>& supplementaryFiles = {});
+              const std::vector<std::filesystem::path>& supplementaryFiles = {},
+              const std::map<std::size_t, std::filesystem::path>& explicitRelocations = {},
+              const JobControl& job = {});
 
     // Opens a KEY/BIF set whose contents remain in browser-owned File objects.
     // The supplied reader is used only while building the archive index; large
@@ -127,6 +134,10 @@ public:
                       std::vector<std::uint8_t>& bytes,
                       std::string& error) const;
 
+    bool streamResource(std::size_t resourceIndex, const ByteSink& sink,
+                        std::string& error, const JobControl& job = {}) const;
+    std::vector<std::filesystem::path> inputPaths() const;
+
     ExtractionReport extractResources(
         const std::vector<std::size_t>& resourceIndices,
         const std::filesystem::path& outputDirectory,
@@ -144,10 +155,12 @@ public:
 
     static std::vector<std::filesystem::path> scanForKeyFiles(
         const std::filesystem::path& root,
-        std::size_t maximumResults = 64);
+        std::size_t maximumResults = 64,
+        const JobControl& job = {});
 
 private:
     std::filesystem::path keyPath_;
+    InputSnapshot keySnapshot_;
     std::uint32_t buildYear_{};
     std::uint32_t buildDay_{};
     std::vector<BifInfo> bifs_;
@@ -159,6 +172,8 @@ private:
 
 std::string resourceTypeExtension(std::uint16_t type);
 std::string resourceTypeLabel(std::uint16_t type);
+// The search bar recognizes bare known extensions without a duplicate type table.
+bool isKnownResourceExtension(const std::string& extension);
 std::string formatByteSize(std::uint64_t bytes);
 std::string hexResourceId(std::uint32_t id);
 std::string extractionLayoutName(ExtractionLayout layout);

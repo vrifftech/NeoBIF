@@ -6,11 +6,6 @@ on:
   repository_dispatch:
     types: [neoshared-updated]
   workflow_dispatch:
-    inputs:
-      neoshared_ref:
-        description: neoshared branch, tag, or commit SHA (blank uses NEOSHARED_REF or main)
-        required: false
-        type: string
 
 permissions:
   contents: read
@@ -20,7 +15,6 @@ concurrency:
   cancel-in-progress: true
 
 env:
-  NEOSHARED_REF: ${{ github.event.client_payload.neoshared_ref || inputs.neoshared_ref || vars.NEOSHARED_REF || 'main' }}
   MACOSX_DEPLOYMENT_TARGET: '15.0'
 
 jobs:
@@ -47,56 +41,13 @@ jobs:
           path: tool
           persist-credentials: false
 
-      - name: Resolve neoshared revision
-        id: neoshared_ref
-        shell: bash
-        run: |
-          set -euo pipefail
-          requested="${NEOSHARED_REF:-main}"
-          if [[ "$requested" =~ ^[0-9a-fA-F]{40}$ ]]; then
-            resolved="${requested,,}"
-          else
-            remote="https://github.com/vrifftech/neoshared.git"
-            resolved=""
-            refspecs=(
-              "refs/heads/$requested"
-              "refs/tags/$requested^{}"
-              "refs/tags/$requested"
-              "$requested"
-            )
-            for refspec in "${refspecs[@]}"; do
-              candidate="$(git ls-remote "$remote" "$refspec" | awk 'NR == 1 { print tolower($1); exit }')"
-              if [[ "$candidate" =~ ^[0-9a-f]{40}$ ]]; then
-                resolved="$candidate"
-                break
-              fi
-            done
-          fi
-          if [[ ! "$resolved" =~ ^[0-9a-f]{40}$ ]]; then
-            echo "::error::Unable to resolve neoshared reference '$requested' to a commit SHA."
-            exit 1
-          fi
-          echo "Resolved neoshared '$requested' to $resolved"
-          echo "sha=$resolved" >> "$GITHUB_OUTPUT"
-
       - name: Check out neoshared
         uses: actions/checkout@v7
         with:
           repository: vrifftech/neoshared
-          ref: ${{ steps.neoshared_ref.outputs.sha }}
+          ref: main
           path: neoshared
           persist-credentials: false
-
-      - name: Verify resolved neoshared revision
-        shell: bash
-        run: |
-          actual="$(git -C neoshared rev-parse HEAD)"
-          expected="${{ steps.neoshared_ref.outputs.sha }}"
-          test "$actual" = "$expected" || {
-            echo "::error::Expected neoshared $expected, got $actual"
-            exit 1
-          }
-
 
       - name: Validate native runner
         run: |
@@ -118,7 +69,6 @@ jobs:
           bash ./scripts/build-macos.sh \
             --arch "${{ matrix.arch }}" \
             --deployment-target "$MACOSX_DEPLOYMENT_TARGET" \
-            --neoshared-root ../neoshared \
             --jobs 2 \
             --clean
 

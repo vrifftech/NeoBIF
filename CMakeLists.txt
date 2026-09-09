@@ -3,32 +3,15 @@ cmake_minimum_required(VERSION 3.16)
 if(POLICY CMP0091)
     cmake_policy(SET CMP0091 NEW)
 endif()
-set(CMAKE_MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>" CACHE STRING "MSVC runtime library" FORCE)
-
-set(NEOSHARED_ROOT "" CACHE PATH
-    "Path to the neoshared source repository; defaults to ../neoshared")
-
-if(NOT NEOSHARED_ROOT AND DEFINED ENV{NEOSHARED_ROOT}
-   AND NOT "$ENV{NEOSHARED_ROOT}" STREQUAL "")
-    set(NEOSHARED_ROOT "$ENV{NEOSHARED_ROOT}" CACHE PATH
-        "Path to the neoshared source repository" FORCE)
+if(NOT DEFINED CMAKE_MSVC_RUNTIME_LIBRARY)
+    set(CMAKE_MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>" CACHE STRING "MSVC runtime library" )
 endif()
 
-if(NOT NEOSHARED_ROOT)
-    get_filename_component(NEOSHARED_ROOT
-        "${CMAKE_CURRENT_LIST_DIR}/../neoshared" ABSOLUTE)
-else()
-    get_filename_component(NEOSHARED_ROOT "${NEOSHARED_ROOT}" ABSOLUTE
-        BASE_DIR "${CMAKE_CURRENT_LIST_DIR}")
-endif()
-set(NEOSHARED_ROOT "${NEOSHARED_ROOT}" CACHE PATH
-    "Path to the neoshared source repository" FORCE)
+include("${CMAKE_CURRENT_LIST_DIR}/cmake/NeoSharedSource.cmake")
 
-if(NOT EXISTS "${NEOSHARED_ROOT}/CMakeLists.txt")
-    message(FATAL_ERROR
-        "neoshared was not found at '${NEOSHARED_ROOT}'. "
-        "Clone the neoshared repository beside this repository, or configure "
-        "with -DNEOSHARED_ROOT=/path/to/neoshared.")
+if(NOT EXISTS "${NEOSHARED_ROOT}/include/neoshared/ResourceDocument.hpp" OR
+   NOT EXISTS "${NEOSHARED_ROOT}/wx/NeoModulePanel.hpp")
+    message(FATAL_ERROR "NeoBIF 1.0.0 requires the matched NeoShared resource/panel API update. Publish the complete current NeoShared source; CI selects main automatically.")
 endif()
 
 include("${NEOSHARED_ROOT}/cmake/NeoVersion.cmake")
@@ -37,9 +20,9 @@ include("${NEOSHARED_ROOT}/cmake/NeoWasm.cmake")
 neo_read_version_header(NEOBIF_VERSION
     "${CMAKE_CURRENT_LIST_DIR}/src/core/Version.hpp"
     NEOBIF_VERSION_STRING)
-project(NeoBIFCpp VERSION ${NEOBIF_VERSION} DESCRIPTION "C++17/wxWidgets KotOR KEY/BIF archive browser" LANGUAGES CXX)
+project(NeoBIFCpp VERSION ${NEOBIF_VERSION} DESCRIPTION "C++17/wxWidgets KotOR game archive browser and extractor" LANGUAGES CXX)
 
-if(MSVC)
+if(MSVC AND NOT NEO_HOSTED_BUILD)
     foreach(_neo_runtime_flag_var IN ITEMS
         CMAKE_C_FLAGS CMAKE_C_FLAGS_DEBUG CMAKE_C_FLAGS_RELEASE CMAKE_C_FLAGS_RELWITHDEBINFO CMAKE_C_FLAGS_MINSIZEREL
         CMAKE_CXX_FLAGS CMAKE_CXX_FLAGS_DEBUG CMAKE_CXX_FLAGS_RELEASE CMAKE_CXX_FLAGS_RELWITHDEBINFO CMAKE_CXX_FLAGS_MINSIZEREL)
@@ -54,7 +37,7 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
 
 function(neo_force_static_msvc_runtime target_name)
-    if(MSVC AND TARGET ${target_name})
+    if(MSVC AND TARGET ${target_name} AND NOT NEO_HOSTED_BUILD)
         set_property(TARGET ${target_name} PROPERTY MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>")
         target_compile_options(${target_name} PRIVATE
             $<$<CONFIG:Debug>:/MTd>
@@ -79,20 +62,36 @@ include(GNUInstallDirs)
 
 message(STATUS "Using neoshared: ${NEOSHARED_ROOT}")
 include("${NEOSHARED_ROOT}/cmake/NeoMinimalRelease.cmake")
+set(NEOSHARED_ENABLE_ERF ON CACHE BOOL
+    "Build the NeoShared ERF/MOD/SAV/HAK/NWM/RIM archive core" FORCE)
 if(NOT TARGET neoshared::wx)
     add_subdirectory("${NEOSHARED_ROOT}"
         "${CMAKE_CURRENT_BINARY_DIR}/neoshared" EXCLUDE_FROM_ALL)
 endif()
+if(NOT TARGET neoshared::erf)
+    message(FATAL_ERROR
+        "NeoBIF requires the neoshared::erf target. Configure NeoShared with "
+        "NEOSHARED_ENABLE_ERF=ON before adding NeoBIF.")
+endif()
 
-
+file(READ "${NEOSHARED_ROOT}/include/neoshared/erf/Utils.hpp" _neobif_shared_utils)
+if(NOT _neobif_shared_utils MATCHES "same_regular_file_revision")
+    message(FATAL_ERROR "NeoBIF requires the matched NeoShared archive-revision safety update. Publish the complete current NeoShared source; CI selects main automatically.")
+endif()
 
 option(NEOBIF_BUILD_CLI "Build the NeoBIF command-line utility" ON)
 
 add_library(neobif_core
+    src/core/SafeOutput.cpp
+    src/core/ArchiveExport.cpp
+    src/core/ResourceQuery.cpp
+    src/core/ResourceDocument.cpp
     src/core/KeyBifArchive.cpp
+    src/core/LooseArchiveCatalog.cpp
 )
 target_include_directories(neobif_core PUBLIC src)
 target_compile_features(neobif_core PUBLIC cxx_std_17)
+target_link_libraries(neobif_core PUBLIC neoshared::erf)
 if(EMSCRIPTEN)
     # Exceptions can originate inside the archive core (for example allocation
     # failures) and are caught by the wx/browser transaction boundary.  The
@@ -122,7 +121,7 @@ option(NEOBIF_BUILD_WX_GUI "Build the wxWidgets desktop GUI when wxWidgets is av
 option(NEOBIF_REQUIRE_WX_GUI "Fail configure if wxWidgets is unavailable while NEOBIF_BUILD_WX_GUI is ON" OFF)
 
 function(neobif_link_wx target_name)
-    target_compile_definitions(${target_name} PRIVATE NOMINMAX WIN32_LEAN_AND_MEAN)
+    target_compile_definitions(${target_name} PUBLIC NOMINMAX WIN32_LEAN_AND_MEAN)
 
     set(_wx_targets)
     foreach(_wx_target IN ITEMS wx::core wx::base wx::adv wx::aui wxWidgets::wxWidgets)
@@ -132,20 +131,22 @@ function(neobif_link_wx target_name)
     endforeach()
 
     if(_wx_targets)
-        target_link_libraries(${target_name} PRIVATE ${_wx_targets})
+        target_link_libraries(${target_name} PUBLIC ${_wx_targets})
     else()
         if(wxWidgets_USE_FILE)
             include(${wxWidgets_USE_FILE})
         endif()
-        target_include_directories(${target_name} SYSTEM PRIVATE ${wxWidgets_INCLUDE_DIRS})
-        target_compile_definitions(${target_name} PRIVATE ${wxWidgets_DEFINITIONS})
-        target_link_libraries(${target_name} PRIVATE ${wxWidgets_LIBRARIES})
+        target_include_directories(${target_name} SYSTEM PUBLIC ${wxWidgets_INCLUDE_DIRS})
+        target_compile_definitions(${target_name} PUBLIC ${wxWidgets_DEFINITIONS})
+        target_link_libraries(${target_name} PUBLIC ${wxWidgets_LIBRARIES})
     endif()
 
     neo_force_static_msvc_runtime(${target_name})
 endfunction()
 
-if(NEOBIF_BUILD_WX_GUI)
+option(NEOBIF_BUILD_WX_MODULE "Build the reusable wxWidgets panel" OFF)
+
+if(NEOBIF_BUILD_WX_GUI OR NEOBIF_BUILD_WX_MODULE)
     set(NEOBIF_WX_COMPONENTS core base adv aui)
     # vcpkg provides CMake package targets such as wx::core and wx::base.
     # Prefer CONFIG mode on Windows/vcpkg, but keep FindwxWidgets/wx-config as
@@ -174,6 +175,21 @@ if(NEOBIF_BUILD_WX_GUI)
     endif()
 
     if(wxWidgets_FOUND OR TARGET wx::core OR TARGET wxWidgets::wxWidgets)
+        add_library(neobif_wx STATIC src/wx/BrowserPanel.cpp)
+        add_library(neobif::wx ALIAS neobif_wx)
+        target_include_directories(neobif_wx PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}/src")
+        target_link_libraries(neobif_wx PUBLIC neobif_core neoshared::wx)
+        neobif_link_wx(neobif_wx)
+        if(NOT EMSCRIPTEN)
+            find_package(Threads REQUIRED)
+            target_link_libraries(neobif_wx PUBLIC Threads::Threads)
+        endif()
+        if(MSVC)
+            target_compile_options(neobif_wx PRIVATE /W4 /permissive-)
+        else()
+            target_compile_options(neobif_wx PRIVATE -Wall -Wextra -Wpedantic)
+        endif()
+        if(NEOBIF_BUILD_WX_GUI)
         set(NEOBIF_WX_SOURCES src/wx/main.cpp)
         if(WIN32)
             neo_configure_windows_version_resource(
@@ -201,7 +217,11 @@ if(NEOBIF_BUILD_WX_GUI)
             SLUG "neobif"
             ICON "${CMAKE_CURRENT_SOURCE_DIR}/resources/neobif.svg"
         )
-        target_link_libraries(NeoBIF PRIVATE neobif_core)
+        target_link_libraries(NeoBIF PRIVATE neobif_wx)
+        if(NOT EMSCRIPTEN)
+            find_package(Threads REQUIRED)
+            target_link_libraries(NeoBIF PRIVATE Threads::Threads)
+        endif()
         target_include_directories(NeoBIF PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/resources)
         target_link_libraries(NeoBIF PRIVATE neoshared::wx)
         neobif_link_wx(NeoBIF)
@@ -228,7 +248,8 @@ if(NEOBIF_BUILD_WX_GUI)
                 DESTINATION ${CMAKE_INSTALL_DATAROOTDIR}/applications
             )
         endif()
-    elseif(NEOBIF_REQUIRE_WX_GUI)
+        endif() # standalone application wrapper
+    elseif(NEOBIF_REQUIRE_WX_GUI OR NEOBIF_BUILD_WX_MODULE)
         message(FATAL_ERROR "wxWidgets was not found, but NEOBIF_REQUIRE_WX_GUI is ON. On Windows, install the pinned wxWidgets 3.3.3 overlay with ../neoshared/scripts/install-wxwidgets.ps1 and configure with the vcpkg toolchain. On Debian or Ubuntu, install libwxgtk3.2-dev.")
     else()
         message(WARNING "wxWidgets was not found. Core and CLI targets will still build; install wxWidgets to build NeoBIF.")

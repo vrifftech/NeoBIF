@@ -10,7 +10,7 @@ param(
     [string]$Target = '',
     [string]$Generator = '',
     [string]$Platform = '',
-    [string]$NeoSharedRoot = $env:NEOSHARED_ROOT,
+    [string]$NeoSharedRoot = '',
     [string]$VcpkgRoot = $env:VCPKG_ROOT,
     [string]$VcpkgTriplet = 'x64-windows-static',
     [switch]$NoVcpkg,
@@ -71,10 +71,9 @@ if (Select-String -Path $CMakeLists -Pattern ([regex]::Escape($cliOption)) -Quie
 }
 
 if ([string]::IsNullOrWhiteSpace($NeoSharedRoot)) {
-    $SiblingNeoShared = Join-Path (Split-Path $RootDir -Parent) 'neoshared'
-    if (Test-Path -LiteralPath (Join-Path $SiblingNeoShared 'CMakeLists.txt')) {
-        $NeoSharedRoot = $SiblingNeoShared
-    }
+    $resolvedShared = & cmake -P (Join-Path $RootDir 'cmake/NeoSharedSource.cmake')
+    if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+    $NeoSharedRoot = ($resolvedShared | Select-Object -Last 1).Trim()
 }
 
 $VcpkgOverlayPorts = $null
