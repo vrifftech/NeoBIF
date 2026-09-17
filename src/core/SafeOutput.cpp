@@ -1,4 +1,5 @@
 #include "core/SafeOutput.hpp"
+#include <neoshared/PathUtf8.hpp>
 #if defined(__EMSCRIPTEN__)
 #include <stdexcept>
 namespace neobif {
@@ -141,7 +142,7 @@ private:
 bool validExportRelativePath(const std::filesystem::path& path) {
     if (path.empty() || path.is_absolute() || path.has_root_name()) return false;
     for (const auto& part : path) {
-        const auto value = part.u8string();
+        const auto value = neoshared::pathToUtf8(part);
         if (value.empty() || value == "." || value == ".." || value.back()=='.' || value.back()==' ') return false;
         for (unsigned char ch : value) if (ch < 32 || ch=='\\' || ch==':' || ch=='*' || ch=='?' || ch=='"' || ch=='<' || ch=='>' || ch=='|') return false;
         const auto base = folded(value.substr(0, value.find('.')));
@@ -161,9 +162,9 @@ std::filesystem::path checkedExportDestination(const std::filesystem::path& root
             rejectLink(current);
             if (!fs::is_directory(current)) throw std::runtime_error("Output parent is not a directory: " + current.string());
             std::vector<fs::path> matches;
-            const auto wanted = folded(component.u8string());
+            const auto wanted = folded(neoshared::pathToUtf8(component));
             for (const auto& child : fs::directory_iterator(current))
-                if (folded(child.path().filename().u8string()) == wanted) matches.push_back(child.path().filename());
+                if (folded(neoshared::pathToUtf8(child.path().filename())) == wanted) matches.push_back(child.path().filename());
             if (matches.size() > 1) throw std::runtime_error("Ambiguous case variants in output: " + (current/component).string());
             if (!matches.empty()) component = matches.front();
         }

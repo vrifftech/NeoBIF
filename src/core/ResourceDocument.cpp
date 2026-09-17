@@ -1,4 +1,5 @@
 #include "ResourceDocument.hpp"
+#include <neoshared/PathUtf8.hpp>
 #include <sstream>
 #include <stdexcept>
 namespace neobif {
@@ -33,13 +34,13 @@ neoshared::ResourceDocument readResourceDocument(const KeyBifArchive& key,
     const auto component=[](const std::string& value){return std::to_string(value.size())+":"+value;};
     const auto normalized=[](const std::filesystem::path& p){
         std::error_code ec;auto result=std::filesystem::weakly_canonical(p,ec);
-        return (ec?p.lexically_normal():result).generic_u8string();
+        return neoshared::genericPathToUtf8(ec?p.lexically_normal():result);
     };
     result.identity="neobif:"+component(normalized(key.keyPath()))+
         component(normalized(source))+component(std::to_string(int(selected.source)))+
         component(std::to_string(memberIndex))+component(std::to_string(id))+component(std::to_string(result.type))+
         component(result.fileName);
-    result.sourceDescription=source.generic_u8string()+" :: "+result.fileName+" (archive snapshot; Save As creates a separate file)";
+    result.sourceDescription=neoshared::genericPathToUtf8(source)+" :: "+result.fileName+" (archive snapshot; Save As creates a separate file)";
     std::string error;
     const bool ok=selected.source==ResourceSource::KeyBif?
         key.readResource(selected.resourceIndex,result.bytes,error):

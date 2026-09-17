@@ -1,5 +1,6 @@
 #include "core/ArchiveExport.hpp"
 #include "core/SafeOutput.hpp"
+#include <neoshared/PathUtf8.hpp>
 #include <algorithm>
 #include <array>
 #include <cctype>
@@ -12,7 +13,7 @@ namespace neobif {
 namespace {
 namespace fs=std::filesystem;
 std::string key(const fs::path& p) {
-    auto text=p.lexically_normal().generic_u8string();
+    auto text=neoshared::genericPathToUtf8(p.lexically_normal());
     for(auto& ch:text) if(ch>='A'&&ch<='Z') ch=static_cast<char>(ch+'a'-'A');
     return text;
 }
@@ -23,7 +24,8 @@ std::vector<fs::path> protectedInputs(const std::vector<ExportItem>& items,const
     return result;
 }
 fs::path numbered(const fs::path& path,std::size_t ordinal) {
-    return path.parent_path()/(path.stem().u8string()+"__"+std::to_string(ordinal)+path.extension().u8string());
+    auto name=path.stem(); name += "__"; name += std::to_string(ordinal); name += path.extension();
+    return path.parent_path()/name;
 }
 bool consume(const ExportItem& item,const ByteSink& sink,std::string& error,const JobControl& job) {
     std::uint64_t count=0;
@@ -154,7 +156,7 @@ bool writeExportZip(const std::vector<ExportItem>& items,const fs::path& path,st
         if(options.existing==ExistingPolicy::KeepBoth||options.keepDuplicateNames)paths=makeUniqueExportPaths(paths);
         std::set<std::string> names;std::uint64_t estimated=22;
         for(std::size_t i=0;i<items.size();++i) {
-            const auto& item=items[i];const auto name=paths[i].generic_u8string();
+            const auto& item=items[i];const auto name=neoshared::genericPathToUtf8(paths[i]);
             if(!validExportRelativePath(paths[i])||name.size()>65535u||(!item.read&&!item.stream))throw std::runtime_error("Invalid ZIP entry: "+item.displayName);
             if(!names.insert(key(paths[i])).second)throw std::runtime_error("Duplicate ZIP resource name; select Keep both or preserve archive hierarchy");
             estimated+=30u+name.size()+item.expectedSize+16u+46u+name.size();
@@ -170,7 +172,7 @@ bool writeExportZip(const std::vector<ExportItem>& items,const fs::path& path,st
         struct Central {std::string name;std::uint32_t crc,size,offset;};std::vector<Central> central;
         for(std::size_t i=0;i<items.size();++i) {
             const auto& item=items[i];options.job.update(i,items.size(),item.displayName);
-            const auto name=paths[i].generic_u8string();const auto offset=static_cast<std::uint32_t>(s.tellp());
+            const auto name=neoshared::genericPathToUtf8(paths[i]);const auto offset=static_cast<std::uint32_t>(s.tellp());
             u32(s,0x04034B50u);u16(s,20);u16(s,0x0808);u16(s,0);u16(s,0);u16(s,0x21);
             u32(s,0);u32(s,0);u32(s,0);u16(s,static_cast<std::uint16_t>(name.size()));u16(s,0);s.write(name.data(),static_cast<std::streamsize>(name.size()));
             std::uint32_t crc=0xFFFFFFFFu;
