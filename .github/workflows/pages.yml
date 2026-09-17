@@ -69,6 +69,15 @@ jobs:
           grep -q 'NeoBIF' tool/dist-wasm/index.html
           node --check neoshared/wasm/neo-pre.js
 
+      - name: Upload WebAssembly build
+        if: ${{ github.event_name != 'pull_request' }}
+        uses: actions/upload-artifact@v7
+        with:
+          name: NeoBIF-web-wasm-${{ github.sha }}
+          path: tool/dist-wasm/
+          if-no-files-found: error
+          retention-days: 14
+
       - name: Configure GitHub Pages
         if: ${{ github.event_name != 'pull_request' }}
         uses: actions/configure-pages@v6
