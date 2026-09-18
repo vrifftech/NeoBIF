@@ -107,6 +107,12 @@ endif()
 
 if(NEOBIF_BUILD_CLI)
     add_executable(neobif-cli src/cli/main.cpp)
+    neo_add_windows_version_resource(neobif-cli
+        VERSION "${PROJECT_VERSION}"
+        PRODUCT_NAME "NeoBIF"
+        FILE_DESCRIPTION "NeoBIF command-line KEY/BIF archive browser and extractor"
+        INTERNAL_NAME "neobif-cli"
+        ORIGINAL_FILENAME "neobif-cli.exe")
     target_link_libraries(neobif-cli PRIVATE neobif_core)
     if(MSVC)
         target_compile_options(neobif-cli PRIVATE /W4 /permissive-)
@@ -192,21 +198,19 @@ if(NEOBIF_BUILD_WX_GUI OR NEOBIF_BUILD_WX_MODULE)
         if(NEOBIF_BUILD_WX_GUI)
         set(NEOBIF_WX_SOURCES src/wx/main.cpp)
         if(WIN32)
-            neo_configure_windows_version_resource(
-                NEOBIF_WX_SOURCES_RC
-                "${CMAKE_CURRENT_SOURCE_DIR}/resources/neobif.rc.in"
-                "neobif.rc"
-                "${CMAKE_CURRENT_SOURCE_DIR}/resources/neobif.ico")
-            list(APPEND NEOBIF_WX_SOURCES "${NEOBIF_WX_SOURCES_RC}")
-        endif()
-
-        if(WIN32)
             add_executable(NeoBIF WIN32 ${NEOBIF_WX_SOURCES})
         elseif(APPLE)
             add_executable(NeoBIF MACOSX_BUNDLE ${NEOBIF_WX_SOURCES})
         else()
             add_executable(NeoBIF ${NEOBIF_WX_SOURCES})
         endif()
+        neo_add_windows_version_resource(NeoBIF
+            VERSION "${PROJECT_VERSION}"
+            PRODUCT_NAME "NeoBIF"
+            FILE_DESCRIPTION "NeoBIF KotOR KEY/BIF archive browser"
+            INTERNAL_NAME "NeoBIF"
+            ORIGINAL_FILENAME "NeoBIF.exe"
+            ICON "${CMAKE_CURRENT_SOURCE_DIR}/resources/neobif.ico")
         neo_configure_macos_bundle(NeoBIF
             NAME "NeoBIF"
             IDENTIFIER "com.vrifftech.neobif"
