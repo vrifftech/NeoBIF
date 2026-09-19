@@ -1,6 +1,6 @@
 # NeoBIF 1.0.0
 
-NeoBIF browses a KotOR **KEY/game-directory session**. Open `chitin.key`, choose a game directory, or supply BIFs for a KEY. ERF/MOD/SAV/HAK/NWM/RIM files discovered beneath that game directory remain browsable using NeoShared's ERF core. Opening those files independently belongs to **NeoERF** and is deliberately not added here.
+NeoBIF browses a KotOR **KEY/game-directory session**. Open `chitin.key`, choose a game directory, or supply BIFs for a KEY. ERF/MOD/SAV/HAK/NWM/RIM files discovered beneath that game directory remain browsable using NeoShared's ERF core.
 
 ## Search
 
@@ -22,9 +22,6 @@ Choose **Export → Export by file type…**, select a type such as **.tga** or 
 
 **Scope: every resource of that type in all indexed BIFs and game-directory archives, regardless of Search, current selection, or expanded pages.** An unavailable/missing payload requires confirmation before it is omitted. Even a single matching resource is saved as a ZIP. The default name is `game_tpc_resources.zip` (or the chosen extension).
 
-Original names are retained under the existing source-archive/type hierarchy inside the ZIP. Distinct copies of the same ResRef in different archives are all exported, not resolved as overrides. Exact path collisions still require explicit Keep both confirmation; the existing staged-write, changed-input checks, source protection, ZIP limits and cancellation apply.
-
-This is **extraction, not conversion**: selecting TGA does not convert TPCs, and resources/sidecars of other types are not silently included. The scope is the current archive session, not a scan of arbitrary loose textures on disk. Selecting a loose archive independently remains NeoERF's job.
 
 ## Extraction
 
@@ -38,19 +35,6 @@ The reader records identity, size, and filesystem modification/change metadata w
 
 If a BIF cannot be found, **Add / Relocate BIF** associates the chosen file with a particular KEY table entry. File size alone never authorizes substitution. Multiple matching candidates require a choice. Structural/type inconsistencies are reported as issues.
 
-## Navigation and long operations
-
-The tree has no global 50,000-resource display cutoff. Resource rows are populated on expansion in groups of at most 512. Expand archive/type branches does not expand every resource page. Filter changes preserve matching selections/expanded branches; successful rescanning clears old numeric selections because the new index may differ.
-
-Native indexing/export uses one joined worker with progress and cancellation checkpoints. Ordinary resource extraction and ZIP writing stream bounded chunks. Classic ZIP limits (65,535 entries and below 4 GiB total) are checked before writing; use folder extraction or a narrower selection for larger jobs. ZIP64 is not added.
-
-The tree supports multi-selection, copying ResRefs/source paths, locating source folders, remembered extraction directories, the existing NeoShared zoom, and the supplied BIF logo.
-
-## Browser
-
-The browser uses retained source files and the matched **NeoShared browser API 11**. Directory extraction skips existing files by default; Replace and Keep both require explicit choices. A small progress/cancel panel accompanies exports. Cancelling keeps completed directory members and aborts the active staged write.
-
-Source handles are checked against destinations. Browsers/import paths that do not expose source handles cannot safely verify replacement aliases: replacing an existing host file is refused, with an explanation to use a separate folder, Skip/Keep both, or a download. Handle-based source size and modification time are rechecked. The browser handle API does not supply POSIX-level exclusive creation or crash-atomic multi-file transactions. Changes by other applications and cleanup failures are reported where detectable; do not run concurrent writers against the extraction directory. A save-file picker can itself leave an empty newly chosen ZIP placeholder when cancelled or aborted.
 
 ## Building and tests
 
@@ -62,7 +46,3 @@ cmake -S . -B build -DNEOSHARED_ROOT=../neoshared \
 cmake --build build --config Release
 ctest --test-dir build -C Release --output-on-failure
 ```
-
-The real wxWidgets smoke test requires a desktop display; Linux CI uses `xvfb-run -a ctest ...`. Without wxWidgets, use `NEOBIF_BUILD_WX_GUI=OFF` for the core/CLI safety tests. Node is used only for engineering tests of the actual browser helper with mocked handles, not by the installed application.
-
-`tests/reference_corpus.cpp` is an optional external-corpus comparison probe. It does not contain or redistribute game archive payloads. See the delivery validation report for which tests were actually executed.
