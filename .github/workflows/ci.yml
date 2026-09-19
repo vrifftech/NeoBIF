@@ -40,7 +40,8 @@ jobs:
             tar \
             unzip \
             zip \
-            libwxgtk3.2-dev
+            libwxgtk3.2-dev \
+            zlib1g-dev
 
       - name: Check out NeoBIF
         uses: actions/checkout@v7
