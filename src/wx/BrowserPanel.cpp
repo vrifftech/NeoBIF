@@ -1745,10 +1745,7 @@ private:
             }
         }
         wxSingleChoiceDialog dialog(this,
-            "Choose the file type to export to one ZIP.\n\n"
-            "Scope: all indexed BIFs and archives in the open game directory.\n"
-            "The Search filter and tree selection do not limit this export.\n"
-            "Source folders and resource names are retained; files are not converted.",
+            "Choose the file type to export to one ZIP",
             "Export by file type", labels);
         dialog.SetSelection(initial);
         if (auto* button = dynamic_cast<wxButton*>(dialog.FindWindow(wxID_OK))) {
