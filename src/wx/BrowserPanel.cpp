@@ -10,6 +10,7 @@
 #include "NeoSettings.hpp"
 #include "NeoViewState.hpp"
 #include "NeoWxUi.hpp"
+#include <neoshared/PathUtf8.hpp>
 
 #if defined(__EMSCRIPTEN__)
 #include "NeoBrowserFiles.hpp"
@@ -73,14 +74,7 @@ std::string lowerAscii(std::string value) {
 }
 
 bool hasExtension(const std::filesystem::path& path, const std::string& extension) {
-    return lowerAscii(path.extension().string()) == lowerAscii(extension);
-}
-
-std::string yesNo(bool value) { return value ? "Yes" : "No"; }
-
-std::string formatBuildYear(std::uint32_t raw) {
-    if (raw > 0u && raw < 1900u) return std::to_string(raw + 1900u) + " (raw " + std::to_string(raw) + ')';
-    return std::to_string(raw);
+    return lowerAscii(neoshared::pathToUtf8(path.extension())) == lowerAscii(extension);
 }
 
 using neobif::ResourceSource;
@@ -154,12 +148,13 @@ public:
     NeoBIFPanelImpl(wxWindow* parent, neomodules::Context context = {})
         : BrowserPanel(parent,std::move(context)),
           filterTimer_(this, ID_FilterTimer),
+          groupByType_(settings_.readBool("View/GroupByType", true)),
           darkMode_(wxui::readDarkMode("NeoBIF")) {
         buildMenus();
         buildUi();
         bindEvents();
         createModuleStatusBar(2);
-        int widths[] = {-1, context_.compact ? -1 : 270};
+        int widths[] = {-3, -2};
         moduleStatusBar()->SetStatusWidths(2, widths);
         fontScale_ = settings_.fontScale();
         fontScaleWheelFilter_.attach(this, [this](int steps) { changeFontScaleSteps(steps); });
@@ -237,41 +232,62 @@ public:
         const auto& entry=looseArchives_.archives()[index];
         if(!entry.valid||entry.browserBacked)return false;
         if(!neobif::unchangedInput(entry.resolvedPath,entry.snapshot))
-            throw std::runtime_error("Archive changed since Game Explorer indexed it. Rescan before opening.");
+            throw std::runtime_error("Archive changed since NeoBIF indexed it. Rescan before opening.");
         archiveOpen_(entry.resolvedPath,allInputPaths());return true;
     }
     void appendOpenCommands(wxMenu& menu) override {
-        wxArrayTreeItemIds nodes;tree_->GetSelections(nodes);
-        const auto* node=nodes.size()==1?static_cast<NodeData*>(tree_->GetItemData(nodes.front())):nullptr;
-        if(node&&node->kind==NodeKind::LooseArchive&&archiveOpen_){
-            const auto index=node->ownerIndex;
-            const bool enabled=!jobRunning_&&index<looseArchives_.archives().size()&&looseArchives_.archives()[index].valid&&!looseArchives_.archives()[index].browserBacked;
-            menu.Append(neobif::ui::kOpenArchiveEditorCommandId,"Open with NeoERF")->Enable(enabled);
-            menu.AppendSeparator();return;
-        }
-        contextOpenSelections_ = selectedResources();
+        contextOpenSelections_.clear();
         contextOpenTargets_.clear();
-        if (!openHandler_.open) return;
-        const auto& selections=contextOpenSelections_;
-        const bool enabled=!jobRunning_ && !selections.empty() &&
-            std::all_of(selections.begin(),selections.end(),[this](const auto& r){return canOpen(r);});
-        if (enabled) {
-            contextOpenTargets_=openTargets(selections.front());
-            for (const auto& selected:selections) {
-                const auto available=openTargets(selected);
-                contextOpenTargets_.erase(std::remove_if(contextOpenTargets_.begin(),contextOpenTargets_.end(),
-                    [&](const auto& choice){return std::none_of(available.begin(),available.end(),
-                        [&](const auto& other){return other.id==choice.id;});}),contextOpenTargets_.end());
+
+        wxArrayTreeItemIds nodes;
+        tree_->GetSelections(nodes);
+        const auto* node = nodes.size() == 1
+            ? static_cast<NodeData*>(tree_->GetItemData(nodes.front()))
+            : nullptr;
+        if (node && node->kind == NodeKind::LooseArchive && archiveOpen_) {
+            const auto index = node->ownerIndex;
+            const bool enabled = !jobRunning_ &&
+                index < looseArchives_.archives().size() &&
+                looseArchives_.archives()[index].valid &&
+                !looseArchives_.archives()[index].browserBacked;
+            if (enabled) {
+                menu.Append(neobif::ui::kOpenArchiveEditorCommandId, "Open with NeoERF");
+                menu.AppendSeparator();
             }
+            return;
+        }
+        if (!selectedNodesAreResources() || !openHandler_.open) return;
+
+        contextOpenSelections_ = selectedResources();
+        const auto& selections = contextOpenSelections_;
+        const bool enabled = !jobRunning_ && !selections.empty() &&
+            std::all_of(selections.begin(), selections.end(),
+                        [this](const auto& resource) { return canOpen(resource); });
+        if (!enabled) return;
+
+        contextOpenTargets_ = openTargets(selections.front());
+        for (const auto& selected : selections) {
+            const auto available = openTargets(selected);
+            contextOpenTargets_.erase(
+                std::remove_if(contextOpenTargets_.begin(), contextOpenTargets_.end(),
+                    [&](const auto& choice) {
+                        return std::none_of(available.begin(), available.end(),
+                            [&](const auto& other) { return other.id == choice.id; });
+                    }),
+                contextOpenTargets_.end());
         }
         // DLG/JRL expose the requested two explicit commands, in default-first order.
-        // Mixed selections can always use the ordinary default-per-resource Open.
-        if (contextOpenTargets_.size()<2) menu.Append(ID_OpenResource,"&Open")->Enable(enabled);
-        if (contextOpenTargets_.size()>1 ||
-            (contextOpenTargets_.size()==1 && selections.size()>1)) {
-            const auto count=std::min(contextOpenTargets_.size(),static_cast<std::size_t>(neobif::ui::kOpenWithCommandCapacity));
-            for(std::size_t i=0;i<count;++i)
-                menu.Append(neobif::ui::kOpenWithFirstCommandId+static_cast<int>(i),wxui::toWx(contextOpenTargets_[i].label))->Enable(enabled);
+        // Mixed resource selections can always use the ordinary default-per-resource Open.
+        if (contextOpenTargets_.size() < 2) menu.Append(ID_OpenResource, "&Open");
+        if (contextOpenTargets_.size() > 1 ||
+            (contextOpenTargets_.size() == 1 && selections.size() > 1)) {
+            const auto count = std::min(
+                contextOpenTargets_.size(),
+                static_cast<std::size_t>(neobif::ui::kOpenWithCommandCapacity));
+            for (std::size_t i = 0; i < count; ++i) {
+                menu.Append(neobif::ui::kOpenWithFirstCommandId + static_cast<int>(i),
+                            wxui::toWx(contextOpenTargets_[i].label));
+            }
         }
         menu.AppendSeparator();
     }
@@ -301,9 +317,13 @@ private:
 #endif
     wxSearchCtrl* filter_{nullptr};
     wxStaticText* searchCount_{nullptr};
+    wxSplitterWindow* splitter_{nullptr};
     wxTreeCtrl* tree_{nullptr};
     wxTextCtrl* details_{nullptr};
     wxStaticText* keyLabel_{nullptr};
+    wxButton* openDirectoryButton_{nullptr};
+    wxButton* openFilesButton_{nullptr};
+    wxButton* addBifsButton_{nullptr};
     wxButton* extractButton_{nullptr};
     wxMenuItem* groupByTypeItem_{nullptr};
     wxMenuItem* darkModeItem_{nullptr};
@@ -327,11 +347,38 @@ private:
         return wxui::toWx(std::string("NeoBIF v") + neobif::kVersion);
     }
 
+    static std::string countText(
+        std::size_t count, const char* singular, const char* plural) {
+        return std::to_string(count) + " " + (count == 1u ? singular : plural);
+    }
+
+    static std::string resourceCountText(std::size_t count) {
+        return countText(count, "resource", "resources");
+    }
+
+    static wxString emptyStateText() {
+        return "Open a KotOR game directory or chitin.key file to browse its resources.\n\n"
+               "Select a resource or branch, then use Extract Selection or save it as a ZIP.";
+    }
+
+    void updateSessionLabel() {
+        if (keyLabel_ == nullptr) return;
+        if (!archive_.isOpen()) {
+            keyLabel_->SetLabel("No game session open");
+            keyLabel_->UnsetToolTip();
+            keyLabel_->GetParent()->Layout();
+            return;
+        }
+        const std::filesystem::path displayPath = !scanRoot_.empty() ? scanRoot_ : keyPath_;
+        const wxString path = neosettings::pathToWx(displayPath);
+        keyLabel_->SetLabel(wxString(!scanRoot_.empty() ? "Game directory: " : "Archive: ") + path);
+        keyLabel_->SetToolTip(path);
+        keyLabel_->GetParent()->Layout();
+    }
+
     void buildMenus() {
         auto* file = new wxMenu;
-        file->Append(ID_OpenArchive, "&Open KEY/BIF Files...\tCtrl+O");
-        file->Append(ID_AddBifs, "&Add or Relocate BIF Files...");
-        file->Append(ID_ScanDirectory, "&Scan Game Directory...");
+        file->Append(ID_ScanDirectory, "Open &Game Directory...");
 #if !defined(__EMSCRIPTEN__)
         gameDirectoryMenu_ = neogames::appendOpenGameDirectoryMenu(
             *this, *file,
@@ -341,23 +388,32 @@ private:
             neogames::GameDirectoryGameIds{"kotor", "kotor2"},
             "Open Saved &KotOR Directory");
 #endif
+        file->Append(ID_OpenArchive, "Open &chitin.key...\tCtrl+O");
+        file->Append(ID_AddBifs, "Add / &Relocate BIF Files...");
         file->AppendSeparator();
-        file->Append(ID_Rescan, "&Rescan current game directory\tF5");
-        file->Append(ID_CloseArchive, "&Close Archive");
+#if defined(__EMSCRIPTEN__)
+        file->Append(ID_Rescan, "Reopen &Game Directory...\tF5");
+#else
+        file->Append(ID_Rescan, "&Rescan Current Session\tF5");
+#endif
+        file->Append(ID_CloseArchive, "&Close Session");
         file->AppendSeparator();
         if(!context_.embedded)file->Append(ID_ModuleExit, "E&xit\tCtrl+Q");
 
         auto* extract = new wxMenu;
-        extract->Append(ID_ExtractSelected, "Extract &Selected Matches...\tCtrl+E");
-        extract->Append(ID_ExtractBranch,"Extract Entire Selected &Branch (ignore filter)...");
-        extract->Append(ID_ExtractAll, "Extract &All...");
+        extract->Append(ID_ExtractSelected, "Extract &Selection...\tCtrl+E",
+            "Extract resources represented by the current tree selection; Search narrows branch selections");
+        extract->Append(ID_ExtractBranch,"Extract Entire Selection (ignore &Search)...",
+            "Extract the complete selected branches without applying Search");
+        extract->Append(ID_ExtractAll, "Extract &All Resources...");
         extract->AppendSeparator();
-        extract->Append(ID_ZipSelected, "Save Selected Matches as &ZIP...");
-        extract->Append(ID_ZipBranch,"Save Entire Branch as ZIP (ignore filter)...");
-        extract->Append(ID_ZipAll, "Save All as Z&IP...");
-
-        auto* exportMenu = new wxMenu;
-        exportMenu->Append(ID_ExportByType, "Export by file &type...",
+        extract->Append(ID_ZipSelected, "Save Selection as &ZIP...",
+            "Save resources represented by the current tree selection; Search narrows branch selections");
+        extract->Append(ID_ZipBranch,"Save Entire Selection as ZIP (ignore Search)...",
+            "Save the complete selected branches without applying Search");
+        extract->Append(ID_ZipAll, "Save All Resources as Z&IP...");
+        extract->AppendSeparator();
+        extract->Append(ID_ExportByType, "Save File &Type as ZIP...",
             "Choose a resource type and export all its entries from the open game session to a ZIP");
 
         auto* view = new wxMenu;
@@ -384,7 +440,6 @@ private:
         auto* bar = new wxMenuBar;
         bar->Append(file, "&File");
         bar->Append(extract, "&Extract");
-        bar->Append(exportMenu, "E&xport");
         bar->Append(view, "&View");
         bar->Append(help, "&Help");
         setModuleMenus(bar);
@@ -395,52 +450,99 @@ private:
         auto* outer = new wxBoxSizer(wxVERTICAL);
 
         auto* actionRow = new wxWrapSizer(wxHORIZONTAL);
-        auto* open = new wxButton(root, ID_OpenArchive, "Open KEY/BIF Files...");
-        auto* scan = new wxButton(root, ID_ScanDirectory, "Scan Game Directory...");
-        auto* add = new wxButton(root, ID_AddBifs, "Add BIF Files...");
-        extractButton_ = new wxButton(root, ID_ExtractSelected, "Extract Selected...");
-        actionRow->Add(open, 0, wxRIGHT, FromDIP(6));
-        actionRow->Add(scan, 0, wxRIGHT, FromDIP(6));
-        actionRow->Add(add, 0, wxRIGHT, FromDIP(6));
-        actionRow->Add(extractButton_, 0, wxRIGHT, FromDIP(12));
-        keyLabel_ = new wxStaticText(root, wxID_ANY, "No archive open");
-        actionRow->Add(keyLabel_, 0, wxALIGN_CENTER_VERTICAL);
+        openDirectoryButton_ = new wxButton(root, ID_ScanDirectory, "Open Game Directory...");
+        openFilesButton_ = new wxButton(root, ID_OpenArchive, "Open chitin.key...");
+        addBifsButton_ = new wxButton(root, ID_AddBifs, "Add / Relocate BIF Files...");
+        extractButton_ = new wxButton(root, ID_ExtractSelected, "Extract Selection...");
+        openDirectoryButton_->SetToolTip(
+            "Recommended: select a KotOR installation to index chitin.key, its BIF files, and game archives.");
+        openFilesButton_->SetToolTip(
+            "Open chitin.key directly. Relocated BIF files can be selected in the same operation.");
+        addBifsButton_->SetToolTip(
+            "Associate selected BIF files with entries from the currently open chitin.key.");
+        extractButton_->SetToolTip(
+            "Extract the resources represented by the current tree selection. Search narrows branch selections.");
+        actionRow->Add(openDirectoryButton_, 0, wxRIGHT | wxBOTTOM, FromDIP(6));
+        actionRow->Add(openFilesButton_, 0, wxRIGHT | wxBOTTOM, FromDIP(6));
+        actionRow->Add(addBifsButton_, 0, wxRIGHT | wxBOTTOM, FromDIP(6));
+        actionRow->Add(extractButton_, 0, wxRIGHT | wxBOTTOM, FromDIP(6));
         outer->Add(actionRow, 0, wxEXPAND | wxALL, FromDIP(8));
 
+        keyLabel_ = new wxStaticText(root, wxID_ANY, "No game session open",
+                                     wxDefaultPosition, wxDefaultSize,
+                                     wxST_ELLIPSIZE_MIDDLE);
+        keyLabel_->SetName("Current game session");
+        keyLabel_->SetMinSize(FromDIP(wxSize(1, -1)));
+        outer->Add(keyLabel_, 0, wxEXPAND | wxLEFT | wxRIGHT | wxBOTTOM, FromDIP(8));
+
+        auto* filterBlock = new wxBoxSizer(wxVERTICAL);
         auto* filterRow = new wxBoxSizer(wxHORIZONTAL);
         filterRow->Add(new wxStaticText(root, wxID_ANY, "Search:"), 0,
                        wxALIGN_CENTER_VERTICAL | wxRIGHT, FromDIP(6));
         filter_ = new wxSearchCtrl(root, wxID_ANY);
         filter_->SetName("Search resources");
-        filter_->SetDescriptiveText("Name or file type: p_bastila, .tga, tpc, *.tpc");
+        filter_->SetDescriptiveText("Resource name, file type, source, ID, or status");
         filter_->SetToolTip("Search names, source paths, IDs or status. File types: .tga, tga, *.tga. "
                             "Filename wildcards: p_*.tpc. Ctrl+F focuses Search; Escape clears it.");
         filter_->ShowCancelButton(true);
         filterRow->Add(filter_, 1, wxEXPAND);
-        searchCount_ = new wxStaticText(root, wxID_ANY, "No archive open");
+        filterBlock->Add(filterRow, 0, wxEXPAND);
+        searchCount_ = new wxStaticText(root, wxID_ANY, "No session");
         searchCount_->SetName("Search result count");
-        filterRow->Add(searchCount_, 0, wxALIGN_CENTER_VERTICAL | wxLEFT, FromDIP(8));
-        outer->Add(filterRow, 0, wxEXPAND | wxLEFT | wxRIGHT | wxBOTTOM, FromDIP(8));
+        filterBlock->Add(searchCount_, 0, wxALIGN_RIGHT | wxTOP, FromDIP(3));
+        outer->Add(filterBlock, 0, wxEXPAND | wxLEFT | wxRIGHT | wxBOTTOM, FromDIP(8));
 
-        auto* splitter = new wxSplitterWindow(root, wxID_ANY, wxDefaultPosition,
-                                              wxDefaultSize, wxSP_LIVE_UPDATE | wxSP_3D);
-        tree_ = new wxTreeCtrl(splitter, wxID_ANY, wxDefaultPosition, wxDefaultSize,
+        splitter_ = new wxSplitterWindow(root, wxID_ANY, wxDefaultPosition,
+                                         wxDefaultSize, wxSP_LIVE_UPDATE | wxSP_3D);
+        tree_ = new wxTreeCtrl(splitter_, wxID_ANY, wxDefaultPosition, wxDefaultSize,
                                wxTR_HAS_BUTTONS | wxTR_LINES_AT_ROOT | wxTR_MULTIPLE |
                                    wxTR_FULL_ROW_HIGHLIGHT);
-        details_ = new wxTextCtrl(splitter, wxID_ANY, wxEmptyString, wxDefaultPosition,
+        details_ = new wxTextCtrl(splitter_, wxID_ANY, emptyStateText(),
+                                  wxDefaultPosition,
                                   wxDefaultSize,
-                                  wxTE_MULTILINE | wxTE_READONLY | wxTE_DONTWRAP |
+                                  wxTE_MULTILINE | wxTE_READONLY | wxTE_WORDWRAP |
                                       wxBORDER_NONE);
-        details_->SetFont(wxFontInfo(10).Family(wxFONTFAMILY_TELETYPE));
-        if(context_.compact) {
-            splitter->SplitHorizontally(tree_,details_,FromDIP(460));
-            splitter->SetMinimumPaneSize(FromDIP(75));splitter->SetSashGravity(0.8);
+        details_->SetName("Selection details");
+        const bool compactLayout = context_.compact;
+        const std::string splitterSetting = compactLayout
+            ? "View/CompactSplitterRatio" : "View/SplitterRatio";
+        const double defaultRatio = compactLayout ? 0.8 : 0.57;
+        const double splitterRatio = std::clamp(
+            settings_.readDouble(splitterSetting, defaultRatio), 0.2, 0.88);
+        if(compactLayout) {
+            splitter_->SplitHorizontally(tree_,details_,FromDIP(460));
+            splitter_->SetMinimumPaneSize(FromDIP(75));
         } else {
-            splitter->SplitVertically(tree_,details_,FromDIP(620));
-            splitter->SetMinimumPaneSize(FromDIP(260));splitter->SetSashGravity(0.57);
+            splitter_->SplitVertically(tree_,details_,FromDIP(620));
+            splitter_->SetMinimumPaneSize(FromDIP(260));
         }
+        splitter_->SetSashGravity(splitterRatio);
+        splitter_->Bind(wxEVT_SPLITTER_SASH_POS_CHANGED,
+            [this, splitterSetting, compactLayout](wxSplitterEvent& event) {
+                const wxSize size = splitter_->GetClientSize();
+                const int span = compactLayout ? size.GetHeight() : size.GetWidth();
+                if (span > 0) {
+                    const double ratio = std::clamp(
+                        static_cast<double>(event.GetSashPosition()) /
+                            static_cast<double>(span),
+                        0.2, 0.88);
+                    splitter_->SetSashGravity(ratio);
+                    settings_.writeDouble(splitterSetting, ratio);
+                }
+                event.Skip();
+            });
+        wxWeakRef<NeoBIFPanelImpl> weak(this);
+        CallAfter([weak, splitterRatio, compactLayout]() {
+            if (!weak || weak->splitter_ == nullptr || !weak->splitter_->IsSplit()) return;
+            const wxSize size = weak->splitter_->GetClientSize();
+            const int span = compactLayout ? size.GetHeight() : size.GetWidth();
+            if (span > 0) {
+                weak->splitter_->SetSashPosition(
+                    static_cast<int>(static_cast<double>(span) * splitterRatio));
+            }
+        });
         tree_->SetName("NeoBIF resource tree");
-        outer->Add(splitter, 1, wxEXPAND | wxLEFT | wxRIGHT | wxBOTTOM, FromDIP(8));
+        outer->Add(splitter_, 1, wxEXPAND | wxLEFT | wxRIGHT | wxBOTTOM, FromDIP(8));
 
         root->SetSizer(outer);
         auto* frameSizer = new wxBoxSizer(wxVERTICAL);
@@ -491,6 +593,7 @@ private:
         }, ID_CollapseAll);
         Bind(wxEVT_MENU, [this](wxCommandEvent& event) {
             groupByType_ = event.IsChecked();
+            settings_.writeBool("View/GroupByType", groupByType_);
             rebuildTree();
         }, ID_GroupByType);
         Bind(wxEVT_MENU, [this](wxCommandEvent& event) {
@@ -558,7 +661,10 @@ private:
         const wxTreeItemId item = event.GetItem();
         if (!item.IsOk()) return;
 
-        if(!tree_->IsSelected(item)){tree_->UnselectAll();tree_->SelectItem(item);}
+        if (!tree_->IsSelected(item)) {
+            tree_->UnselectAll();
+            tree_->SelectItem(item);
+        }
         showSelectedDetails();
         updateCommandState();
 
@@ -566,62 +672,133 @@ private:
         if (data == nullptr) return;
 
         const auto selections = selectedResources();
-        const bool hasExtractable = std::any_of(
-            selections.begin(), selections.end(), [this](const ResourceSelection& selection) {
-                return resourceIsExtractable(selection);
-            });
+        const auto entireSelections = selectedResources(false);
+        const auto hasExtractable = [this](const auto& resources) {
+            return std::any_of(resources.begin(), resources.end(),
+                [this](const ResourceSelection& resource) {
+                    return resourceIsExtractable(resource);
+                });
+        };
 
-        wxString extractLabel = "&Extract Selection...";
-        wxString zipLabel = "Save Selection as &ZIP...";
+        wxArrayTreeItemIds selectedItems;
+        tree_->GetSelections(selectedItems);
+        const auto sourcePaths = selectedSourceArchivePaths();
+        const bool multipleNodes = selectedItems.size() > 1;
+        const bool resourceNodes = selectedNodesAreResources();
+        const bool filterActive = !filter_->GetValue().empty();
+        const bool scopeNarrowed = selections.size() < entireSelections.size();
+        bool branchNode = false;
+        for (const auto& selectedItem : selectedItems) {
+            const auto* selectedData =
+                dynamic_cast<NodeData*>(tree_->GetItemData(selectedItem));
+            if (selectedData != nullptr && selectedData->kind != NodeKind::Resource &&
+                selectedData->kind != NodeKind::Page) {
+                branchNode = true;
+                break;
+            }
+        }
+
+        wxString extractLabel = "Extract Selection...";
+        wxString zipLabel = "Save Selection as ZIP...";
+        wxString entireLabel = "Extract Entire Selection...";
+        wxString entireZipLabel = "Save Entire Selection as ZIP...";
         switch (data->kind) {
         case NodeKind::Root:
-            extractLabel = "Extract &All...";
-            zipLabel = "Save All as &ZIP...";
+            extractLabel = "Extract All Resources...";
+            zipLabel = "Save All Resources as ZIP...";
+            entireLabel = extractLabel;
+            entireZipLabel = zipLabel;
             break;
         case NodeKind::Bif:
-            extractLabel = "Extract &BIF...";
-            zipLabel = "Save BIF as &ZIP...";
+            extractLabel = "Extract BIF...";
+            zipLabel = "Save BIF as ZIP...";
+            entireLabel = "Extract Entire BIF...";
+            entireZipLabel = "Save Entire BIF as ZIP...";
             break;
         case NodeKind::LooseRoot:
-            extractLabel = "Extract Game &Archives...";
-            zipLabel = "Save Game Archives as &ZIP...";
+            extractLabel = "Extract Game Archives...";
+            zipLabel = "Save Game Archives as ZIP...";
+            entireLabel = "Extract All Game Archives...";
+            entireZipLabel = "Save All Game Archives as ZIP...";
             break;
         case NodeKind::Directory:
-            extractLabel = "Extract Archive &Folder...";
-            zipLabel = "Save Archive Folder as &ZIP...";
+            extractLabel = "Extract Archive Folder...";
+            zipLabel = "Save Archive Folder as ZIP...";
+            entireLabel = "Extract Entire Archive Folder...";
+            entireZipLabel = "Save Entire Archive Folder as ZIP...";
             break;
         case NodeKind::LooseArchive:
-            extractLabel = "Extract &Archive...";
-            zipLabel = "Save Archive as &ZIP...";
+            extractLabel = "Extract Archive...";
+            zipLabel = "Save Archive as ZIP...";
+            entireLabel = "Extract Entire Archive...";
+            entireZipLabel = "Save Entire Archive as ZIP...";
             break;
         case NodeKind::Type:
-            extractLabel = "Extract Resource &Type...";
-            zipLabel = "Save Resource Type as &ZIP...";
+            extractLabel = "Extract Resource Type...";
+            zipLabel = "Save Resource Type as ZIP...";
+            entireLabel = "Extract Entire Resource Type...";
+            entireZipLabel = "Save Entire Resource Type as ZIP...";
             break;
         case NodeKind::Page:
-            extractLabel = "Extract Page Matches..."; zipLabel = "Save Page Matches as ZIP..."; break;
+            extractLabel = "Extract Page...";
+            zipLabel = "Save Page as ZIP...";
+            break;
         case NodeKind::Resource:
-            extractLabel = "Extract &Resource...";
-            zipLabel = "Save Resource as &ZIP...";
+            extractLabel = "Extract Resource...";
+            zipLabel = "Save Resource as ZIP...";
             break;
         }
 
-        if(!filter_->GetValue().empty()) {
-            extractLabel="Extract Selected Matches...";zipLabel="Save Selected Matches as ZIP...";
+        if (multipleNodes && !resourceNodes) {
+            entireLabel = "Extract Entire Selection...";
+            entireZipLabel = "Save Entire Selection as ZIP...";
         }
+
+        if (resourceNodes) {
+            extractLabel = selections.size() == 1
+                ? "Extract Resource..." : "Extract Selected Resources...";
+            zipLabel = selections.size() == 1
+                ? "Save Resource as ZIP..." : "Save Selected Resources as ZIP...";
+        } else if (filterActive && scopeNarrowed) {
+            extractLabel = "Extract Matching Resources...";
+            zipLabel = "Save Matching Resources as ZIP...";
+        } else if (multipleNodes) {
+            extractLabel = "Extract Selected Items...";
+            zipLabel = "Save Selected Items as ZIP...";
+        }
+
         wxMenu menu;
         appendOpenCommands(menu);
-        wxMenuItem* extractItem = menu.Append(ID_ExtractSelected, extractLabel);
-        wxMenuItem* zipItem = menu.Append(ID_ZipSelected, zipLabel);
-        extractItem->Enable(hasExtractable);
-        zipItem->Enable(hasExtractable);
-        menu.Append(ID_ExtractBranch,"Extract Entire Branch (ignore filter)...");
-        menu.AppendSeparator();
-        menu.Append(ID_CopyResref,"Copy resource name(s)");
-        menu.Append(ID_CopySource,"Copy source archive path(s)");
+        menu.Append(ID_ExtractSelected, extractLabel)->Enable(hasExtractable(selections));
+        menu.Append(ID_ZipSelected, zipLabel)->Enable(hasExtractable(selections));
+
+        // Without a Search filter, these would duplicate the extraction commands above.
+        if (filterActive && scopeNarrowed && branchNode) {
+            menu.AppendSeparator();
+            menu.Append(ID_ExtractBranch, entireLabel)->Enable(hasExtractable(entireSelections));
+            menu.Append(ID_ZipBranch, entireZipLabel)->Enable(hasExtractable(entireSelections));
+        }
+
+        const bool showResourceNames = resourceNodes && !selections.empty();
+        const bool showSourceActions = !sourcePaths.empty();
+        if (showResourceNames || showSourceActions) {
+            menu.AppendSeparator();
+            if (showResourceNames) {
+                menu.Append(ID_CopyResref,
+                            selections.size() == 1
+                                ? "Copy ResRef" : "Copy ResRefs");
+            }
+            if (showSourceActions) {
+                menu.Append(ID_CopySource,
+                            sourcePaths.size() == 1
+                                ? "Copy source archive path" : "Copy source archive paths");
+            }
 #if !defined(__EMSCRIPTEN__)
-        menu.Append(ID_LocateSource,"Show source archive folder");
+            if (sourcePaths.size() == 1) {
+                menu.Append(ID_LocateSource, "Show in File Manager");
+            }
 #endif
+        }
         PopupMenu(&menu);
     }
 
@@ -632,7 +809,7 @@ private:
         const std::uint64_t request = ++browserSelectionRequest_;
         wxWeakRef<NeoBIFPanelImpl> weak(this);
         neobrowser::requestRetainedFiles(
-            "Open chitin.key and optional BIF files", ".key,.bif", true,
+            "Open chitin.key and optional relocated BIF files", ".key,.bif", true,
             [weak, request](neobrowser::RetainedFileSetResult result) mutable {
                 if (!weak) {
                     if (result.sessionId != 0) neobrowser::releaseRetainedFileSet(result.sessionId);
@@ -647,7 +824,7 @@ private:
 #else
         wxWeakRef<NeoBIFPanelImpl> weak(this);
         wxui::requestOpenFiles(
-            this, "Open chitin.key and optional BIF files", kArchiveWildcard,
+            this, "Open chitin.key and optional relocated BIF files", kArchiveWildcard,
             [weak](std::vector<std::filesystem::path> paths) mutable {
                 if (!weak || paths.empty()) return;
                 weak->openSelectedFiles(std::move(paths));
@@ -674,15 +851,20 @@ private:
         }
         std::filesystem::path key = keys.front();
         if (keys.size() > 1u) {
-            const auto preferred = std::find_if(keys.begin(), keys.end(), [](const auto& path) {
-                return lowerAscii(path.filename().string()) == "chitin.key";
-            });
-            if (preferred != keys.end()) key = *preferred;
-            else {
-                wxMessageBox("More than one KEY file was selected. Select one game archive at a time.",
-                             "Multiple KEY Files", wxOK | wxICON_ERROR, this);
-                return;
+            wxArrayString choices;
+            int preferred = 0;
+            for (std::size_t i = 0; i < keys.size(); ++i) {
+                choices.Add(neosettings::pathToWx(keys[i]));
+                if (lowerAscii(neoshared::pathToUtf8(keys[i].filename())) == "chitin.key") {
+                    preferred = static_cast<int>(i);
+                }
             }
+            wxSingleChoiceDialog dialog(this,
+                "More than one KEY file was selected. Choose the game archive to open:",
+                "Select KEY File", choices);
+            dialog.SetSelection(preferred);
+            if (dialog.ShowModal() != wxID_OK) return;
+            key = keys[static_cast<std::size_t>(dialog.GetSelection())];
         }
         openArchive(key, std::move(bifs), key.parent_path());
 #else
@@ -730,11 +912,35 @@ private:
         for(const auto& path:paths) {
             if(!hasExtension(path,".bif"))continue;
             wxArrayString choices;
-            for(const auto& bif:archive_.bifs()) choices.Add(wxui::toWx(std::to_string(bif.index)+": "+bif.storedPath+
-                (bif.available?" [currently available]":" [missing]") ));
-            wxSingleChoiceDialog dialog(this,"Which KEY entry should use this exact file?\n"+neosettings::pathToWx(path),"Relocate BIF",choices);
+            int suggested = wxNOT_FOUND;
+            int firstMissing = wxNOT_FOUND;
+            const std::string selectedName = lowerAscii(
+                neoshared::pathToUtf8(path.filename()));
+            for (std::size_t i = 0; i < archive_.bifs().size(); ++i) {
+                const auto& bif = archive_.bifs()[i];
+                choices.Add(wxui::toWx(std::to_string(bif.index)+": "+bif.storedPath+
+                    (bif.available?" [currently available]":" [missing]") ));
+                if (!bif.available && firstMissing == wxNOT_FOUND) {
+                    firstMissing = static_cast<int>(i);
+                }
+                std::string portableStoredPath = bif.storedPath;
+                std::replace(portableStoredPath.begin(), portableStoredPath.end(), '\\', '/');
+                const std::string storedName = lowerAscii(neoshared::pathToUtf8(
+                    std::filesystem::path(portableStoredPath).filename()));
+                if (storedName == selectedName && suggested == wxNOT_FOUND) {
+                    suggested = static_cast<int>(i);
+                }
+            }
+            wxSingleChoiceDialog dialog(this,
+                "Which KEY entry should use this exact file?\n"+neosettings::pathToWx(path),
+                "Relocate BIF",choices);
+            if (suggested != wxNOT_FOUND) dialog.SetSelection(suggested);
+            else if (firstMissing != wxNOT_FOUND) dialog.SetSelection(firstMissing);
+            else if (!choices.IsEmpty()) dialog.SetSelection(0);
             if(dialog.ShowModal()!=wxID_OK)return;
-            replacements[static_cast<std::size_t>(dialog.GetSelection())]=path;
+            const std::size_t selection = static_cast<std::size_t>(dialog.GetSelection());
+            if (selection >= archive_.bifs().size()) return;
+            replacements[archive_.bifs()[selection].index]=path;
         }
         explicitRelocations_=std::move(replacements);
         openArchive(keyPath_,supplementaryFiles_,scanRoot_);
@@ -766,10 +972,18 @@ private:
                 acceptBrowserFileSet(weak, std::move(result), false, request);
             });
 #else
-        wxDirDialog dialog(this, "Select a KotOR game directory", wxEmptyString,
+        std::filesystem::path initialDirectory = scanRoot_;
+        if (initialDirectory.empty()) {
+            initialDirectory = settings_.readPath("Paths/LastGameDirectory").value_or(
+                std::filesystem::path{});
+        }
+        wxDirDialog dialog(this, "Select a KotOR game directory",
+                           neosettings::pathToWx(initialDirectory),
                            wxDD_DEFAULT_STYLE | wxDD_DIR_MUST_EXIST);
         if (dialog.ShowModal() != wxID_OK) return;
-        scanDirectory(neosettings::pathFromWx(dialog.GetPath()));
+        const auto directory = neosettings::pathFromWx(dialog.GetPath());
+        settings_.writePath("Paths/LastGameDirectory", directory);
+        scanDirectory(directory);
 #endif
     }
 
@@ -815,8 +1029,10 @@ private:
             return std::nullopt;
         }
         std::stable_sort(candidates.begin(), candidates.end(), [](const auto& left, const auto& right) {
-            const bool leftChitin = lowerAscii(std::filesystem::path(left.relativePath).filename().string()) == "chitin.key";
-            const bool rightChitin = lowerAscii(std::filesystem::path(right.relativePath).filename().string()) == "chitin.key";
+            const bool leftChitin = lowerAscii(neoshared::pathToUtf8(
+                std::filesystem::path(left.relativePath).filename())) == "chitin.key";
+            const bool rightChitin = lowerAscii(neoshared::pathToUtf8(
+                std::filesystem::path(right.relativePath).filename())) == "chitin.key";
             if (leftChitin != rightChitin) return leftChitin;
             const std::size_t leftDepth = browserPathDepth(left.relativePath);
             const std::size_t rightDepth = browserPathDepth(right.relativePath);
@@ -826,8 +1042,10 @@ private:
         if (candidates.size() > 1u) {
             const auto& first = candidates[0];
             const auto& second = candidates[1];
-            const bool firstChitin = lowerAscii(std::filesystem::path(first.relativePath).filename().string()) == "chitin.key";
-            const bool secondChitin = lowerAscii(std::filesystem::path(second.relativePath).filename().string()) == "chitin.key";
+            const bool firstChitin = lowerAscii(neoshared::pathToUtf8(
+                std::filesystem::path(first.relativePath).filename())) == "chitin.key";
+            const bool secondChitin = lowerAscii(neoshared::pathToUtf8(
+                std::filesystem::path(second.relativePath).filename())) == "chitin.key";
             if (firstChitin == secondChitin &&
                 browserPathDepth(first.relativePath) == browserPathDepth(second.relativePath)) {
                 error = "More than one equally likely KEY file was selected. Select one game installation at a time.";
@@ -905,13 +1123,43 @@ private:
 
         if(appendBifs && weak->archive_.isOpen()) {
             wxArrayString choices;
-            for(const auto& bif:weak->archive_.bifs()) choices.Add(wxui::toWx("["+std::to_string(bif.index)+"] "+bif.storedPath));
+            for(const auto& bif:weak->archive_.bifs()) {
+                choices.Add(wxui::toWx("["+std::to_string(bif.index)+"] "+bif.storedPath+
+                    (bif.available ? " [currently available]" : " [missing]")));
+            }
             for(auto& selected:combined) if(selected.sessionId==result.sessionId && hasExtension(std::filesystem::path(selected.relativePath),".bif")) {
-                wxSingleChoiceDialog dialog(weak.get(),wxui::toWx("Choose the KEY entry supplied by " + selected.relativePath),"Relocate BIF explicitly",choices);
+                int suggested = wxNOT_FOUND;
+                int firstMissing = wxNOT_FOUND;
+                const std::string selectedName = lowerAscii(neoshared::pathToUtf8(
+                    std::filesystem::path(selected.relativePath).filename()));
+                for (std::size_t i = 0; i < weak->archive_.bifs().size(); ++i) {
+                    const auto& bif = weak->archive_.bifs()[i];
+                    if (!bif.available && firstMissing == wxNOT_FOUND) {
+                        firstMissing = static_cast<int>(i);
+                    }
+                    std::string portableStoredPath = bif.storedPath;
+                    std::replace(portableStoredPath.begin(), portableStoredPath.end(), '\\', '/');
+                    const std::string storedName = lowerAscii(neoshared::pathToUtf8(
+                        std::filesystem::path(portableStoredPath).filename()));
+                    if (storedName == selectedName && suggested == wxNOT_FOUND) {
+                        suggested = static_cast<int>(i);
+                    }
+                }
+                wxSingleChoiceDialog dialog(weak.get(),
+                    wxui::toWx("Choose the KEY entry supplied by " + selected.relativePath),
+                    "Relocate BIF Explicitly",choices);
+                if (suggested != wxNOT_FOUND) dialog.SetSelection(suggested);
+                else if (firstMissing != wxNOT_FOUND) dialog.SetSelection(firstMissing);
+                else if (!choices.IsEmpty()) dialog.SetSelection(0);
                 if(dialog.ShowModal()!=wxID_OK) { neobrowser::releaseRetainedFileSet(result.sessionId); return; }
-                const auto index=static_cast<std::size_t>(dialog.GetSelection());
-                for(auto& previous:combined) if(&previous!=&selected && previous.explicitBifIndex==index) previous.explicitBifIndex.reset();
-                selected.explicitBifIndex=index;
+                const auto choice=static_cast<std::size_t>(dialog.GetSelection());
+                if (choice >= weak->archive_.bifs().size()) {
+                    neobrowser::releaseRetainedFileSet(result.sessionId);
+                    return;
+                }
+                const std::size_t bifIndex = weak->archive_.bifs()[choice].index;
+                for(auto& previous:combined) if(&previous!=&selected && previous.explicitBifIndex==bifIndex) previous.explicitBifIndex.reset();
+                selected.explicitBifIndex=bifIndex;
             }
         }
 
@@ -924,6 +1172,7 @@ private:
             return;
         }
 
+        if (weak->filterTimer_.IsRunning()) weak->flushSearch();
         weak->browserIndexing_ = true;
         weak->Enable(false);
         neobif::KeyBifArchive loaded;
@@ -1053,6 +1302,10 @@ private:
         for (const auto& [sessionId, fileIds] : retainedIdsBySession) {
             if (!fileIds.empty()) frame->browserSessions_.push_back(sessionId);
         }
+        if (!appendBifs) {
+            frame->filterTimer_.Stop();
+            frame->filter_->ChangeValue(wxEmptyString);
+        }
         frame->expandedNodes_.clear();frame->selectedNodes_.clear();frame->tree_->DeleteAllItems();
         frame->archive_ = std::move(loaded);
         frame->looseArchives_ = std::move(loadedLoose);
@@ -1060,11 +1313,9 @@ private:
         frame->scanRoot_ = frame->keyPath_.parent_path();
         frame->supplementaryFiles_.clear();
         ++frame->browserGeneration_;
-        frame->keyLabel_->SetLabel(wxui::toWx(
-            frame->scanRoot_.empty() ? key->relativePath
-                                     : frame->scanRoot_.generic_string()));
+        frame->updateSessionLabel();
         frame->setModuleTitle(appTitle() + " - " +
-                        wxui::toWx(frame->keyPath_.filename().string()));
+                        wxui::toWx(neoshared::pathToUtf8(frame->keyPath_.filename())));
         frame->rebuildTree();
         frame->updateStatus();
         frame->updateCommandState();
@@ -1085,7 +1336,8 @@ private:
     template<class Work>
     bool runJob(const wxString& title, Work work) {
         if(jobRunning_)return false;
-        jobRunning_=true;cancelJob_.store(false);filterTimer_.Stop();
+        if (filterTimer_.IsRunning()) flushSearch();
+        jobRunning_=true;cancelJob_.store(false);
         struct BusyReset { bool& flag; ~BusyReset(){flag=false;} } busyReset{jobRunning_};
         std::atomic<bool> finished{false};
         std::mutex mutex;std::string detail="Preparing...";std::size_t done=0,total=0;
@@ -1109,7 +1361,7 @@ private:
         worker.join();dialog.Update(1000);jobRunning_=false;
         if(failure) {
             try{std::rethrow_exception(failure);}
-            catch(const neobif::JobCancelled&){setModuleStatusText("Cancelled; existing session retained");return false;}
+            catch(const neobif::JobCancelled&){setModuleStatusText("Operation cancelled; current session retained");return false;}
             catch(const std::exception& ex){wxMessageBox(wxui::toWx(ex.what()),title,wxOK|wxICON_ERROR,this);return false;}
         }
         return true;
@@ -1121,7 +1373,8 @@ private:
                      std::filesystem::path scanRoot) {
 #if !defined(__EMSCRIPTEN__)
         if(jobRunning_)return;
-        const bool sameSession=keyPath_==key;
+        const bool sameSession = archive_.isOpen() &&
+            neosettings::samePathForMru(keyPath_, key);
         const auto mappings=sameSession?explicitRelocations_:std::map<std::size_t,std::filesystem::path>{};
         if(scanRoot.empty())scanRoot=key.parent_path();
         if(scanRoot.empty())scanRoot=std::filesystem::current_path();
@@ -1132,7 +1385,11 @@ private:
             if(!loose.scan(scanRoot,8192u,job))throw std::runtime_error(loose.lastError());
             job.check();
         }))return;
-        if(!sameSession)explicitRelocations_.clear();
+        if(!sameSession) {
+            explicitRelocations_.clear();
+            filterTimer_.Stop();
+            filter_->ChangeValue(wxEmptyString);
+        }
         // Indices may change on rescan. Preserve navigation across filters,
         // never reinterpret an old numeric selection as a new resource.
         expandedNodes_.clear();selectedNodes_.clear();tree_->DeleteAllItems();
@@ -1141,7 +1398,7 @@ private:
         keyPath_ = key;
         scanRoot_ = std::move(scanRoot);
         supplementaryFiles_ = std::move(supplementary);
-        keyLabel_->SetLabel(neosettings::pathToWx(scanRoot_));
+        updateSessionLabel();
         setModuleTitle(appTitle() + " - " + neosettings::pathToWx(keyPath_.filename()));
         rebuildTree();
         updateStatus();
@@ -1169,8 +1426,8 @@ private:
         visibleBif_.clear();
         visibleLoose_.clear();
         tree_->DeleteAllItems();
-        details_->ChangeValue(wxEmptyString);
-        keyLabel_->SetLabel("No archive open");
+        updateSessionLabel();
+        details_->ChangeValue(emptyStateText());
         setModuleTitle(appTitle());
         updateStatus();
         updateCommandState();
@@ -1202,19 +1459,38 @@ private:
         return query.matches(resource.fileName(), resource.extension,
             {resource.resref, neobif::resourceTypeLabel(resource.type),
              neobif::hexResourceId(resource.resourceId), resource.status,
-             archive.relativePath.generic_string(), neobif::looseArchiveKindName(archive.kind)});
+             neoshared::genericPathToUtf8(archive.relativePath),
+             neobif::looseArchiveKindName(archive.kind)});
     }
 
     void updateSearchCount() {
         if (!searchCount_) return;
         if (!archive_.isOpen()) {
-            searchCount_->SetLabel("No archive open");
+            searchCount_->SetLabel("No session");
+            searchCount_->UnsetToolTip();
         } else {
             const auto count = std::count(visibleBif_.begin(), visibleBif_.end(), true) +
                                std::count(visibleLoose_.begin(), visibleLoose_.end(), true);
             const auto total = archive_.resources().size() + looseArchives_.resources().size();
-            searchCount_->SetLabel(wxui::toWx(std::to_string(count) + " / " +
-                                            std::to_string(total) + " matches"));
+            if (filter_->GetValue().empty()) {
+                searchCount_->SetLabel(wxui::toWx(
+                    std::to_string(total) + (total == 1u ? " resource" : " resources")));
+                searchCount_->UnsetToolTip();
+            } else {
+                const wxTreeItemId root = tree_->GetRootItem();
+                const bool archiveBranchMatches = root.IsOk() &&
+                    tree_->GetChildrenCount(root, false) != 0u;
+                searchCount_->SetLabel(wxui::toWx(
+                    std::to_string(count) +
+                    (count == 1u ? " resource match" : " resource matches")));
+                std::string tip = std::to_string(count) + " of " +
+                    std::to_string(total) +
+                    " indexed resources match the current Search.";
+                if (count == 0u && archiveBranchMatches) {
+                    tip += " An archive or folder name matches, so that branch remains visible.";
+                }
+                searchCount_->SetToolTip(wxui::toWx(tip));
+            }
         }
         searchCount_->GetParent()->Layout();
     }
@@ -1309,7 +1585,7 @@ private:
         std::map<std::uint16_t,std::vector<std::size_t>> groups;
         for(auto index:visible)groups[source==ResourceSource::KeyBif?archive_.resources()[index].type:looseArchives_.resources()[index].type].push_back(index);
         for(const auto& [type,indices]:groups) {
-            const auto node=tree_->AppendItem(parent,wxui::toWx(neobif::resourceTypeLabel(type)+" - "+std::to_string(indices.size())), -1,-1,
+            const auto node=tree_->AppendItem(parent,wxui::toWx("."+neobif::resourceTypeExtension(type)+" ("+std::to_string(indices.size())+")"), -1,-1,
                 new NodeData(NodeKind::Type,owner,kNoIndex,type,source));
             attachResourceList(node,indices);
         }
@@ -1346,8 +1622,9 @@ private:
                 visible.push_back(index);visibleBif_[index]=true;
             }
             if(visible.empty()&&!ownerMatches)continue;
-            const std::string label=bif.storedPath+" - "+std::to_string(visible.size())+" matching resources"+
-                (!bif.available?" [MISSING]":(!bif.valid?" [INVALID]":""));
+            const std::string label=bif.storedPath+" ("+std::to_string(visible.size())+
+                (query.empty()?" resources)":" matches)")+
+                (!bif.available?" [missing]":(!bif.valid?" [invalid]":""));
             const auto node=tree_->AppendItem(root,wxui::toWx(label),-1,-1,new NodeData(NodeKind::Bif,bif.index));
             addResourceGroups(node,ResourceSource::KeyBif,bif.index,visible);
         }
@@ -1355,26 +1632,28 @@ private:
         std::map<std::string,wxTreeItemId> directories;
         for(const auto& archive:looseArchives_.archives()) {
             std::vector<std::size_t> visible;
-            const bool ownerMatches=query.empty()||query.matchesContext(archive.relativePath.generic_string())||
+            const bool ownerMatches=query.empty()||query.matchesContext(neoshared::genericPathToUtf8(archive.relativePath))||
                 query.matchesContext(neobif::looseArchiveKindName(archive.kind))||
                 std::any_of(archive.messages.begin(),archive.messages.end(),[&](const std::string& message){return query.matchesContext(message);});
             for(auto index:archive.resourceIndices)if(index<looseArchives_.resources().size()&&(ownerMatches||looseResourceMatches(looseArchives_.resources()[index],archive,query))) {
                 visible.push_back(index);visibleLoose_[index]=true;
             }
             if(visible.empty()&&!ownerMatches)continue;
-            if(!looseRoot.IsOk())looseRoot=tree_->AppendItem(root,"Game-directory archives",-1,-1,
+            if(!looseRoot.IsOk())looseRoot=tree_->AppendItem(root,"Game Archives",-1,-1,
                 new NodeData(NodeKind::LooseRoot,kNoIndex,kNoIndex,0,ResourceSource::LooseArchive));
             auto parent=looseRoot;std::filesystem::path accumulated;
             for(const auto& component:archive.relativePath.parent_path()) {
-                const auto part=component.generic_string();if(part.empty()||part=="."||part=="..")continue;
-                accumulated/=component;const auto pathKey=lowerAscii(accumulated.generic_string());
+                const auto part=neoshared::genericPathToUtf8(component);if(part.empty()||part=="."||part=="..")continue;
+                accumulated/=component;const auto pathKey=lowerAscii(neoshared::genericPathToUtf8(accumulated));
                 auto found=directories.find(pathKey);
                 if(found==directories.end()) {
-                    parent=tree_->AppendItem(parent,wxui::toWx(part),-1,-1,new NodeData(NodeKind::Directory,kNoIndex,kNoIndex,0,ResourceSource::LooseArchive,accumulated.generic_string()));
+                    parent=tree_->AppendItem(parent,wxui::toWx(part),-1,-1,new NodeData(NodeKind::Directory,kNoIndex,kNoIndex,0,ResourceSource::LooseArchive,neoshared::genericPathToUtf8(accumulated)));
                     directories.emplace(pathKey,parent);
                 }else parent=found->second;
             }
-            const auto label=archive.relativePath.filename().generic_string()+" - "+std::to_string(visible.size())+" matching resources"+(!archive.valid?" [INVALID]":"");
+            const auto label=neoshared::pathToUtf8(archive.relativePath.filename())+" ("+
+                std::to_string(visible.size())+(query.empty()?" resources)":" matches)")+
+                (!archive.valid?" [invalid]":"");
             const auto node=tree_->AppendItem(parent,wxui::toWx(label),-1,-1,new NodeData(NodeKind::LooseArchive,archive.index,kNoIndex,0,ResourceSource::LooseArchive));
             addResourceGroups(node,ResourceSource::LooseArchive,archive.index,visible);
         }
@@ -1392,8 +1671,8 @@ private:
         const auto& resource = archive_.resources()[resourceIndex];
         std::ostringstream label;
         label << resource.fileName() << " - " << neobif::formatByteSize(resource.size);
-        if (!resource.extractable) label << " [UNAVAILABLE]";
-        if (!resource.keyed) label << " [UNINDEXED]";
+        if (!resource.extractable) label << " [unavailable]";
+        if (!resource.keyed) label << " [not indexed]";
         tree_->AppendItem(parent, wxui::toWx(label.str()), -1, -1,
                           new NodeData(NodeKind::Resource, resource.bifIndex,
                                        resourceIndex, resource.type,
@@ -1405,7 +1684,7 @@ private:
         const auto& resource = looseArchives_.resources()[resourceIndex];
         std::ostringstream label;
         label << resource.fileName() << " - " << neobif::formatByteSize(resource.size);
-        if (!resource.extractable) label << " [UNAVAILABLE]";
+        if (!resource.extractable) label << " [unavailable]";
         tree_->AppendItem(parent, wxui::toWx(label.str()), -1, -1,
                           new NodeData(NodeKind::Resource, resource.archiveIndex,
                                        resourceIndex, resource.type,
@@ -1417,11 +1696,23 @@ private:
         return selections.empty()?nullptr:dynamic_cast<NodeData*>(tree_->GetItemData(selections.front()));
     }
 
+    bool selectedNodesAreResources() const {
+        wxArrayTreeItemIds selections;
+        tree_->GetSelections(selections);
+        if (selections.empty()) return false;
+        for (const auto& item : selections) {
+            const auto* data = dynamic_cast<NodeData*>(tree_->GetItemData(item));
+            if (data == nullptr || data->kind != NodeKind::Resource) return false;
+        }
+        return true;
+    }
+
     static bool archiveIsUnderDirectory(const std::filesystem::path& archivePath,
                                         const std::string& directoryPath) {
-        std::string parent = lowerAscii(archivePath.parent_path().lexically_normal().generic_string());
-        std::string directory = lowerAscii(
-            std::filesystem::path(directoryPath).lexically_normal().generic_string());
+        std::string parent = lowerAscii(neoshared::genericPathToUtf8(
+            archivePath.parent_path().lexically_normal()));
+        std::string directory = lowerAscii(neoshared::genericPathToUtf8(
+            neoshared::pathFromUtf8(directoryPath).lexically_normal()));
         while (!parent.empty() && parent.back() == '/') parent.pop_back();
         while (!directory.empty() && directory.back() == '/') directory.pop_back();
         return parent == directory ||
@@ -1565,11 +1856,12 @@ private:
             return archivePath + "/" + resource.fileName();
         }
         if (selection.resourceIndex >= looseArchives_.resources().size()) {
-            return "Invalid standalone archive resource";
+            return "Invalid game-archive resource";
         }
         const auto& resource = looseArchives_.resources()[selection.resourceIndex];
         const std::string archivePath = resource.archiveIndex < looseArchives_.archives().size()
-            ? looseArchives_.archives()[resource.archiveIndex].relativePath.generic_string()
+            ? neoshared::genericPathToUtf8(
+                  looseArchives_.archives()[resource.archiveIndex].relativePath)
             : "<invalid archive>";
         return archivePath + "/" + resource.fileName();
     }
@@ -1663,31 +1955,46 @@ private:
 #endif
 
     std::string selectionBaseName(const std::vector<ResourceSelection>& selections) const {
+        wxArrayTreeItemIds selectedItems;
+        tree_->GetSelections(selectedItems);
+        if (selectedItems.size() > 1u) return "selected_resources";
+
         const NodeData* data = selectedNodeData();
         if (data != nullptr) {
+            if (data->kind == NodeKind::Root) {
+                return filter_->GetValue().empty() ? "game_resources" : "search_results";
+            }
             if (data->kind == NodeKind::Resource) {
                 const std::filesystem::path file(resourceFileName(
                     {data->source, data->resourceIndex}));
-                return file.stem().string().empty() ? "resource" : file.stem().string();
+                const auto stem = neoshared::pathToUtf8(file.stem());
+                return stem.empty() ? "resource" : stem;
             }
             if (data->kind == NodeKind::Bif && data->ownerIndex < archive_.bifs().size()) {
                 std::string stored = archive_.bifs()[data->ownerIndex].storedPath;
                 std::replace(stored.begin(), stored.end(), '\\', '/');
                 const auto path = std::filesystem::path(stored);
-                return path.stem().string().empty() ? "bif_resources" : path.stem().string();
+                const auto stem = neoshared::pathToUtf8(path.stem());
+                return stem.empty() ? "bif_resources" : stem;
             }
             if (data->kind == NodeKind::LooseArchive &&
                 data->ownerIndex < looseArchives_.archives().size()) {
-                const auto stem = looseArchives_.archives()[data->ownerIndex]
-                    .relativePath.stem().string();
+                const auto stem = neoshared::pathToUtf8(
+                    looseArchives_.archives()[data->ownerIndex].relativePath.stem());
                 return stem.empty() ? "archive_resources" : stem;
             }
             if (data->kind == NodeKind::Directory) {
-                const auto name = std::filesystem::path(data->directoryPath).filename().string();
+                const auto name = neoshared::pathToUtf8(
+                    neoshared::pathFromUtf8(data->directoryPath).filename());
                 return name.empty() ? "directory_archives" : name;
             }
             if (data->kind == NodeKind::LooseRoot) return "game_archives";
-            if (data->kind == NodeKind::Type) return neobif::resourceTypeExtension(data->type);
+            if (data->kind == NodeKind::Type) {
+                return neobif::resourceTypeExtension(data->type) + "_resources";
+            }
+            if (data->kind == NodeKind::Page) {
+                return neobif::resourceTypeExtension(data->type) + "_resource_page";
+            }
         }
         const std::size_t total = archive_.resources().size() + looseArchives_.resources().size();
         return selections.size() == total ? "game_resources" : "neobif_selection";
@@ -1698,7 +2005,7 @@ private:
         if (filterTimer_.IsRunning()) flushSearch();
         const auto selections = selectedResources(respectFilter);
         if (selections.empty()) {
-            wxMessageBox("Select a resource or archive branch first.", "Nothing Selected",
+            wxMessageBox("Select a resource or branch first.", "Nothing Selected",
                          wxOK | wxICON_INFORMATION, this);
             return;
         }
@@ -1726,11 +2033,12 @@ private:
         for (std::size_t i = 0; i < types.size(); ++i) {
             const auto& entry = types[i];
             std::string label = "." + entry.extension + " - " +
-                std::to_string(entry.total) + " resources (" +
-                std::to_string(entry.available) + " available";
-            if (entry.available != entry.total) label += ", " +
-                std::to_string(entry.total - entry.available) + " unavailable";
-            label += ")";
+                std::to_string(entry.total) +
+                (entry.total == 1u ? " resource" : " resources");
+            if (entry.available != entry.total) {
+                label += " (" + std::to_string(entry.total - entry.available) +
+                    " unavailable)";
+            }
             labels.Add(wxui::toWx(label));
             if (entry.available && !pickedAvailable) {
                 initial = static_cast<int>(i);
@@ -1746,10 +2054,10 @@ private:
         }
         wxSingleChoiceDialog dialog(this,
             "Choose the file type to export to one ZIP",
-            "Export by file type", labels);
+            "Save File Type as ZIP", labels);
         dialog.SetSelection(initial);
         if (auto* button = dynamic_cast<wxButton*>(dialog.FindWindow(wxID_OK))) {
-            button->SetLabel("Export ZIP...");
+            button->SetLabel("Save ZIP...");
         }
         wxui::applyTheme(&dialog, darkMode_);
         neoview::applyFontScale(&dialog, fontScale_);
@@ -1831,22 +2139,33 @@ private:
         int directoryPolicy=0;
         if(!singleResource&&!forceZip&&neobrowser::retainedDirectoryWriteSupported()) {
             wxArrayString choices;choices.Add("Skip existing files (recommended)");choices.Add("Replace existing files");choices.Add("Keep both with explicit filename suffixes");
-            wxSingleChoiceDialog dialog(this,"Choose output conflict behavior", "Extract matching resources",choices);
+            wxSingleChoiceDialog dialog(this,"Choose output conflict behavior", "Extraction conflicts",choices);
             if(dialog.ShowModal()!=wxID_OK)return;
             directoryPolicy=dialog.GetSelection();
         }
         std::set<std::string> names;bool duplicate=false;
-        for(const auto& path:outputPaths)if(!names.insert(lowerAscii(path.generic_string())).second)duplicate=true;
+        for(const auto& path:outputPaths)if(!names.insert(lowerAscii(neoshared::genericPathToUtf8(path))).second)duplicate=true;
         if(duplicate) {
-            if(wxMessageBox("The selection has duplicate output names. Keep both by adding explicit suffixes? Cancel to select nonconflicting resources instead.","Resource name conflicts",wxYES_NO|wxNO_DEFAULT|wxICON_WARNING,this)!=wxYES)return;
+            const bool keepBothAlreadySelected = directoryPolicy == 2 &&
+                !singleResource && !forceZip &&
+                neobrowser::retainedDirectoryWriteSupported();
+            if (!keepBothAlreadySelected &&
+                wxMessageBox(
+                    "The selection contains duplicate output paths. Keep every copy by "
+                    "adding explicit filename suffixes? Choose No to return and narrow "
+                    "the selection.",
+                    "Resource Name Conflicts",
+                    wxYES_NO | wxNO_DEFAULT | wxICON_WARNING, this) != wxYES) {
+                return;
+            }
             std::vector<std::string> identities;
             for(const auto& selection:extractable)identities.push_back(resourceIdentity(selection));
             outputPaths=neobif::makeUniqueExportPaths(outputPaths,identities);
-            std::ostringstream namesText;namesText<<"Explicit keep-both export names:\n";
-            for(const auto& path:outputPaths)namesText<<path.generic_string()<<'\n';
-            details_->SetValue(wxui::toWx(namesText.str()));
+            std::ostringstream namesText;namesText<<"Keep-both output names:\n";
+            for(const auto& path:outputPaths)namesText<<neoshared::genericPathToUtf8(path)<<'\n';
+            details_->ChangeValue(wxui::toWx(namesText.str()));
+            details_->SetInsertionPoint(0);
         }
-        if(wxMessageBox(wxui::toWx("Extract "+std::to_string(extractable.size())+" selected/matching resources?"),"Confirm extraction scope",wxOK|wxCANCEL|wxICON_QUESTION,this)!=wxOK)return;
         std::vector<neobrowser::RetainedExportEntry> entries;
         entries.reserve(extractable.size());
         for (std::size_t position = 0; position < extractable.size(); ++position) {
@@ -1863,7 +2182,7 @@ private:
             }
             entries.push_back(neobrowser::RetainedExportEntry{
                 sessionId, fileId, offset, size,
-                outputPaths[position].generic_string()});
+                neoshared::genericPathToUtf8(outputPaths[position])});
         }
 
         neobrowser::RetainedExportMode mode = neobrowser::RetainedExportMode::DirectDownload;
@@ -1879,44 +2198,70 @@ private:
             outputName = sanitizeDownloadName(baseName);
         }
 
+        std::string confirmation;
+        if (mode == neobrowser::RetainedExportMode::DirectDownload) {
+            confirmation = "Download " + resourceCountText(extractable.size()) +
+                " as " + outputName + "?";
+        } else if (mode == neobrowser::RetainedExportMode::ZipDownload) {
+            confirmation = "Save " + resourceCountText(extractable.size()) +
+                " in " + outputName + "?";
+        } else {
+            confirmation = "Extract " + resourceCountText(extractable.size()) +
+                " to a selected browser directory?";
+        }
+        if (wxMessageBox(wxui::toWx(confirmation), "Confirm Extraction",
+                         wxOK | wxCANCEL | wxICON_QUESTION, this) != wxOK) {
+            return;
+        }
+
         const std::uint64_t generation = browserGeneration_;
         const std::size_t requestedCount = entries.size();
         const bool directDownload = mode == neobrowser::RetainedExportMode::DirectDownload;
         wxWeakRef<NeoBIFPanelImpl> weak(this);
-        setModuleStatusText( "Preparing " + std::to_string(requestedCount) +
-                                      " browser extraction item(s)...");
+        setModuleStatusText("Preparing " + resourceCountText(requestedCount) + "...");
         jobRunning_=true;Enable(false);
         neobrowser::requestExportRetainedFiles(
             mode, outputName, entries,
-            [weak, generation, outputName, directDownload](
+            [weak, generation, directDownload](
                 neobrowser::RetainedExportResult result) {
                 if (!weak) return;
                 NeoBIFPanelImpl* frame = weak.get();frame->jobRunning_=false;frame->Enable(true);
+                frame->updateCommandState();
                 if(frame->browserGeneration_!=generation)return;
-                if (!result.details.empty()) frame->details_->SetValue(wxui::toWx(result.details));
                 if (!result.error.empty()) {
-                    wxMessageBox(wxui::toWx(result.error), "Extraction Failed",
+                    wxString message = wxui::toWx(result.error);
+                    if (!result.details.empty()) {
+                        message += "\n\n" + wxui::toWx(result.details);
+                    }
+                    wxMessageBox(message, "Extraction Failed",
                                  wxOK | wxICON_ERROR, frame);
-                    frame->setModuleStatusText( "Extraction stopped; "+std::to_string(result.filesWritten)+" completed files retained");
+                    frame->setModuleStatusText("Extraction failed");
                     return;
                 }
                 if (result.cancelled()) {
-                    frame->setModuleStatusText( "Browser extraction cancelled");
+                    frame->setModuleStatusText("Extraction cancelled");
                     return;
                 }
-                std::ostringstream status;
-                if (result.usedDirectory) {
-                    status << "Extracted " << result.filesWritten
-                           << " resource(s); " << result.filesSkipped << " existing files skipped";
-                    if(result.stopped)status<<"; cancelled, completed files retained";
-                } else if (directDownload) {
-                    status << "Prepared download: " << outputName;
-                } else {
-                    status << "Prepared " << result.filesWritten
-                           << " resource(s) in " << outputName;
+                if (result.stopped) {
+                    frame->setModuleStatusText("Extraction stopped; completed files retained");
+                    wxMessageBox(
+                        "Extraction stopped. Any completed files were retained.",
+                        "Extraction Stopped", wxOK | wxICON_INFORMATION, frame);
+                    return;
                 }
-                status << " (" << neobif::formatByteSize(result.bytesWritten) << ')';
-                frame->setModuleStatusText( status.str());
+                if (result.usedDirectory) {
+                    frame->setModuleStatusText("Extraction complete");
+                    wxMessageBox("Extraction complete.", "Extraction Complete",
+                                 wxOK | wxICON_INFORMATION, frame);
+                } else if (directDownload) {
+                    frame->setModuleStatusText("Download prepared");
+                    wxMessageBox("Download prepared.", "Download Ready",
+                                 wxOK | wxICON_INFORMATION, frame);
+                } else {
+                    frame->setModuleStatusText("ZIP download prepared");
+                    wxMessageBox("ZIP download prepared.", "ZIP Ready",
+                                 wxOK | wxICON_INFORMATION, frame);
+                }
             });
 #else
         neobif::ExportOptions options;
@@ -1932,19 +2277,32 @@ private:
         }
         if(forceZip) {
             std::set<std::string> names;bool duplicate=false;
-            for(const auto& item:items)if(!names.insert(lowerAscii(item.relativePath.generic_string())).second)duplicate=true;
+            for(const auto& item:items)if(!names.insert(lowerAscii(neoshared::genericPathToUtf8(item.relativePath))).second)duplicate=true;
             if(duplicate) {
                 if(wxMessageBox("Several resources have the same output name. Keep both by explicitly adding suffixes inside the ZIP?", "ZIP name conflicts",wxYES_NO|wxICON_WARNING,this)!=wxYES)return;
                 options.keepDuplicateNames=true;
             }
-            const auto selected=chooseOutputFile("Save resources as ZIP",kZipWildcard,sanitizeDownloadName(baseName)+".zip");
+            const auto selected=chooseOutputFile("Save resources as ZIP",kZipWildcard,
+                sanitizeDownloadName(baseName)+".zip", ".zip");
             if(!selected)return;
-            auto output=*selected;if(output.extension().empty())output+=".zip";
-            if(wxMessageBox(wxui::toWx("Write "+std::to_string(items.size())+" resources to:\n"+output.string()),"Confirm ZIP extraction",wxOK|wxCANCEL|wxICON_QUESTION,this)!=wxOK)return;
+            const auto output=*selected;
+            std::uint64_t inputBytes = 0u;
+            for (const auto& item : items) inputBytes += item.expectedSize;
+            const std::string confirmation = "Save " + resourceCountText(items.size()) +
+                " (" + neobif::formatByteSize(inputBytes) + ") to:\n\n" +
+                neoshared::pathToUtf8(output);
+            if(wxMessageBox(wxui::toWx(confirmation), "Confirm ZIP",
+                            wxOK|wxCANCEL|wxICON_QUESTION,this)!=wxOK)return;
             options.existing=neobif::ExistingPolicy::Replace;std::string error;bool written=false;
             if(!runJob("Writing ZIP",[&](const neobif::JobControl& job){options.job=job;written=neobif::writeExportZip(items,output,error,options);}))return;
-            if(!written)wxMessageBox(wxui::toWx(error),"ZIP was not committed",wxOK|wxICON_WARNING,this);
-            else setModuleStatusText("Wrote "+output.string());
+            if(!written) {
+                if (error.empty()) error = "NeoBIF could not commit the ZIP archive.";
+                wxMessageBox(wxui::toWx(error),"ZIP Was Not Saved",wxOK|wxICON_WARNING,this);
+            } else {
+                setModuleStatusText("ZIP saved");
+                wxMessageBox("ZIP saved successfully.", "ZIP Saved",
+                             wxOK | wxICON_INFORMATION, this);
+            }
             return;
         }
         wxString lastDirectory;
@@ -1952,20 +2310,38 @@ private:
         wxDirDialog directory(this,"Select extraction directory",lastDirectory,wxDD_DEFAULT_STYLE|wxDD_DIR_MUST_EXIST);
         if(directory.ShowModal()!=wxID_OK)return;
         const auto output=neosettings::pathFromWx(directory.GetPath());rememberOutputDirectory(output);
-        wxArrayString policies;policies.Add("Skip existing files; hold duplicate resource names (recommended)");
-        policies.Add("Replace existing files; hold duplicate resource names");
-        policies.Add("Keep both; explicitly add filename suffixes when needed");
+        wxArrayString policies;
+        policies.Add("Skip existing files; do not write name conflicts (recommended)");
+        policies.Add("Replace existing files; do not write name conflicts");
+        policies.Add("Keep both by adding explicit filename suffixes");
         wxSingleChoiceDialog policy(this,"How should output name conflicts be handled?", "Extraction conflicts",policies);
         if(policy.ShowModal()!=wxID_OK)return;
         options.existing=policy.GetSelection()==1?neobif::ExistingPolicy::Replace:
             (policy.GetSelection()==2?neobif::ExistingPolicy::KeepBoth:neobif::ExistingPolicy::Skip);
         neobif::ExportPlan plan;
         if(!runJob("Checking extraction destinations",[&](const neobif::JobControl& job){options.job=job;plan=neobif::planExportItems(items,output,options);}))return;
-        std::ostringstream summary;summary<<plan.writes<<" files to write\n"<<plan.skipped<<" existing files to skip\n"<<plan.conflicts<<" conflicting/unsafe files held\n\n"<<output.string();
-        std::size_t shown=0;
-        for(const auto& entry:plan.entries)if(!entry.message.empty()&&shown++<15)summary<<"\n"<<items[entry.itemIndex].displayName<<": "<<entry.message;
-        if(plan.writes==0){wxMessageBox(wxui::toWx(summary.str()),"No files to write",wxOK|wxICON_INFORMATION,this);return;}
-        summary<<"\n\nContinue with these "<<plan.writes<<" files?";
+        std::ostringstream summary;
+        summary << countText(plan.writes, "file", "files") << " to write\n"
+                << countText(plan.skipped, "existing file", "existing files") << " to skip\n"
+                << countText(plan.conflicts, "conflicting or unsafe file",
+                             "conflicting or unsafe files") << " not written\n\n"
+                << neoshared::pathToUtf8(output);
+        const std::size_t messageCount = static_cast<std::size_t>(std::count_if(
+            plan.entries.begin(), plan.entries.end(),
+            [](const neobif::PlannedExport& entry) { return !entry.message.empty(); }));
+        std::size_t shown = 0u;
+        for (const auto& entry : plan.entries) {
+            if (entry.message.empty() || shown >= 15u) continue;
+            summary << "\n" << items[entry.itemIndex].displayName << ": " << entry.message;
+            ++shown;
+        }
+        if (messageCount > shown) {
+            summary << "\n... " << (messageCount - shown)
+                    << " additional destination notes are not shown.";
+        }
+        if(plan.writes==0){wxMessageBox(wxui::toWx(summary.str()),"No Files to Write",wxOK|wxICON_INFORMATION,this);return;}
+        summary << "\n\nContinue with "
+                << (plan.writes == 1u ? "this file?" : "these files?");
         if(wxMessageBox(wxui::toWx(summary.str()),"Confirm extraction scope",wxOK|wxCANCEL|wxICON_QUESTION,this)!=wxOK)return;
         std::vector<neobif::ExportItem> approved;
         for(const auto& entry:plan.entries) if(entry.action==neobif::ExportAction::Write) {
@@ -1975,8 +2351,7 @@ private:
         if(options.existing==neobif::ExistingPolicy::KeepBoth) options.existing=neobif::ExistingPolicy::Skip;
         neobif::ExtractionReport report;
         if(!runJob("Extracting resources",[&](const neobif::JobControl& job){options.job=job;report=neobif::extractExportItems(approved,output,options);}))return;
-        report.skipped+=plan.skipped; report.failed+=plan.conflicts;
-        for(const auto& entry:plan.entries) if(!entry.message.empty()) report.messages.push_back(entry.message);
+        report.failed+=plan.conflicts;
         showExtractionResult(report);
 #endif
     }
@@ -2005,68 +2380,184 @@ private:
         const auto& archive=looseArchives_.archives()[owner];
         return archive.browserBacked?std::filesystem::path(archive.browserRelativePath):archive.resolvedPath;
     }
+
+    std::filesystem::path sourceArchivePath(const NodeData& node) const {
+        if (node.kind == NodeKind::Resource) {
+            return sourceArchivePath(
+                ResourceSelection{node.source, node.resourceIndex});
+        }
+        if ((node.kind == NodeKind::Bif || node.kind == NodeKind::Type ||
+             node.kind == NodeKind::Page) &&
+            node.source == ResourceSource::KeyBif &&
+            node.ownerIndex < archive_.bifs().size()) {
+            const auto& bif = archive_.bifs()[node.ownerIndex];
+            return bif.browserBacked ? std::filesystem::path(bif.browserRelativePath)
+                                     : bif.resolvedPath;
+        }
+        if ((node.kind == NodeKind::LooseArchive || node.kind == NodeKind::Type ||
+             node.kind == NodeKind::Page) &&
+            node.source == ResourceSource::LooseArchive &&
+            node.ownerIndex < looseArchives_.archives().size()) {
+            const auto& archive = looseArchives_.archives()[node.ownerIndex];
+            return archive.browserBacked
+                ? std::filesystem::path(archive.browserRelativePath)
+                : archive.resolvedPath;
+        }
+        return {};
+    }
+
+    std::vector<std::filesystem::path> selectedSourceArchivePaths() const {
+        wxArrayTreeItemIds selectedItems;
+        tree_->GetSelections(selectedItems);
+        std::vector<std::filesystem::path> paths;
+        std::set<std::string> seen;
+        for (const auto& item : selectedItems) {
+            const auto* data = dynamic_cast<NodeData*>(tree_->GetItemData(item));
+            if (data == nullptr) continue;
+            const auto path = sourceArchivePath(*data);
+            if (path.empty()) continue;
+            std::string key = neoshared::genericPathToUtf8(path.lexically_normal());
+#if defined(_WIN32)
+            key = lowerAscii(std::move(key));
+#endif
+            if (seen.insert(key).second) paths.push_back(path);
+        }
+        return paths;
+    }
+
     std::vector<std::filesystem::path> allInputPaths() const {
         auto paths=archive_.inputPaths();
         for(const auto& archive:looseArchives_.archives())if(!archive.resolvedPath.empty())paths.push_back(archive.resolvedPath);
         return paths;
     }
     void copySelection(bool sourcePaths) {
-        std::set<std::string> seen;std::string text;
-        for(const auto& selected:selectedResources()) {
-            const auto value=sourcePaths?sourceArchivePath(selected).generic_string():
-                (selected.source==ResourceSource::KeyBif?archive_.resources()[selected.resourceIndex].resref:looseArchives_.resources()[selected.resourceIndex].resref);
-            if(value.empty()||!seen.insert(value).second)continue;
-            if(!text.empty()) text+='\n';
-            text+=value;
+        std::set<std::string> seen;
+        std::string text;
+        if (sourcePaths) {
+            for (const auto& path : selectedSourceArchivePaths()) {
+                const auto value = neoshared::pathToUtf8(path);
+                if (value.empty() || !seen.insert(value).second) continue;
+                if (!text.empty()) text += '\n';
+                text += value;
+            }
+        } else {
+            for (const auto& selected : selectedResources()) {
+                const auto value = selected.source == ResourceSource::KeyBif
+                    ? archive_.resources()[selected.resourceIndex].resref
+                    : looseArchives_.resources()[selected.resourceIndex].resref;
+                if (value.empty() || !seen.insert(value).second) continue;
+                if (!text.empty()) text += '\n';
+                text += value;
+            }
         }
-        if(!text.empty()&&wxTheClipboard->Open()){wxTheClipboard->SetData(new wxTextDataObject(wxui::toWx(text)));wxTheClipboard->Close();}
+        if (text.empty()) return;
+        if (!wxTheClipboard->Open()) {
+            wxMessageBox("The clipboard is unavailable.", "Copy Failed",
+                         wxOK | wxICON_WARNING, this);
+            return;
+        }
+        wxTheClipboard->SetData(new wxTextDataObject(wxui::toWx(text)));
+        wxTheClipboard->Close();
+        setModuleStatusText("Copied " + std::to_string(seen.size()) +
+            (sourcePaths ? (seen.size() == 1u ? " source path" : " source paths")
+                         : (seen.size() == 1u ? " ResRef" : " ResRefs")));
     }
     void locateSource() {
 #if !defined(__EMSCRIPTEN__)
-        const auto selections=selectedResources();
-        std::filesystem::path source;
-        if(!selections.empty())source=sourceArchivePath(selections.front());
-        else if(const auto* data=selectedNodeData()) {
-            if(data->kind==NodeKind::Bif&&data->ownerIndex<archive_.bifs().size())source=archive_.bifs()[data->ownerIndex].resolvedPath;
-            else if(data->kind==NodeKind::LooseArchive&&data->ownerIndex<looseArchives_.archives().size())source=looseArchives_.archives()[data->ownerIndex].resolvedPath;
-        }
+        const auto paths = selectedSourceArchivePaths();
+        const std::filesystem::path source = paths.size() == 1u ? paths.front()
+                                                               : std::filesystem::path{};
         if(source.empty()||!wxLaunchDefaultApplication(neosettings::pathToWx(source.parent_path())))
-            wxMessageBox("The source folder is unavailable.","Show archive folder",wxOK|wxICON_INFORMATION,this);
+            wxMessageBox("The source folder is unavailable.","Show in File Manager",wxOK|wxICON_INFORMATION,this);
 #endif
     }
 #if !defined(__EMSCRIPTEN__)
     void rememberOutputDirectory(const std::filesystem::path& directory) {
         if(auto* config=wxConfigBase::Get()){config->Write("extraction/lastDirectory",neosettings::pathToWx(directory));config->Flush();}
     }
-    std::optional<std::filesystem::path> chooseOutputFile(const std::string& title,const std::string& wildcard,const std::string& name) {
+    std::optional<std::filesystem::path> chooseOutputFile(
+        const std::string& title, const std::string& wildcard,
+        const std::string& name, std::string requiredExtension = {}) {
         wxString directory;if(auto* config=wxConfigBase::Get())config->Read("extraction/lastDirectory",&directory);
         wxFileDialog dialog(this,wxui::toWx(title),directory,wxui::toWx(name),wxui::toWx(wildcard),wxFD_SAVE|wxFD_OVERWRITE_PROMPT);
         if(dialog.ShowModal()!=wxID_OK)return std::nullopt;
-        auto path=neosettings::pathFromWx(dialog.GetPath());rememberOutputDirectory(path.parent_path());return path;
+        auto path=neosettings::pathFromWx(dialog.GetPath());
+        if (!requiredExtension.empty()) {
+            if (requiredExtension.front() != '.') requiredExtension.insert(requiredExtension.begin(), '.');
+            if (lowerAscii(neoshared::pathToUtf8(path.extension())) !=
+                lowerAscii(requiredExtension)) {
+                path.replace_extension(requiredExtension);
+                std::error_code ec;
+                if (std::filesystem::exists(path, ec) && !ec &&
+                    wxMessageBox(wxString("The ZIP already exists:\n\n") +
+                                     neosettings::pathToWx(path) +
+                                     "\n\nReplace it?",
+                                 "Replace Existing ZIP", wxYES_NO | wxNO_DEFAULT |
+                                     wxICON_WARNING, this) != wxYES) {
+                    return std::nullopt;
+                }
+            }
+        }
+        rememberOutputDirectory(path.parent_path());return path;
     }
     void showExtractionResult(const neobif::ExtractionReport& report) {
-        std::ostringstream message;
-        if(report.cancelled)message<<"Cancelled. ";
-        message<<report.written<<" written, "<<report.skipped<<" skipped, "<<report.failed<<" held/failed.";
-        setModuleStatusText(message.str());
-        // Keep ordinary success quiet, but make conflicts and explicit renames
-        // visible and copyable in the existing detail pane.
-        for(const auto& detail:report.messages)message<<'\n'<<detail;
-        details_->ChangeValue(wxui::toWx(message.str()));
-        if(report.failed)wxMessageBox(wxui::toWx("Some files were not extracted.\n"+std::to_string(report.failed)+" held or failed. See the detail pane; use Rescan if an archive changed."),"Extraction needs attention",wxOK|wxICON_WARNING,this);
+        if (report.cancelled) {
+            setModuleStatusText("Extraction cancelled");
+            wxMessageBox(
+                "Extraction was cancelled. Any completed files were retained.",
+                "Extraction Cancelled", wxOK | wxICON_INFORMATION, this);
+            return;
+        }
+
+        wxString message;
+        if (report.failed != 0u) {
+            setModuleStatusText("Extraction finished with warnings");
+            message = "Extraction finished, but some files could not be written.";
+            wxMessageBox(message, "Extraction Needs Attention",
+                         wxOK | wxICON_WARNING, this);
+            return;
+        }
+
+        setModuleStatusText("Extraction complete");
+        message = "Extraction complete.";
+        wxMessageBox(message, "Extraction Complete",
+                     wxOK | wxICON_INFORMATION, this);
     }
 #endif
 
     void showSelectedDetails() {
-        if(rebuilding_)return;
+        if (rebuilding_) return;
         if (!archive_.isOpen()) {
-            details_->ChangeValue(wxEmptyString);
+            details_->ChangeValue(emptyStateText());
+            details_->SetInsertionPoint(0);
             return;
         }
+
+        const std::size_t visibleCount =
+            static_cast<std::size_t>(std::count(visibleBif_.begin(), visibleBif_.end(), true)) +
+            static_cast<std::size_t>(std::count(visibleLoose_.begin(), visibleLoose_.end(), true));
+        const wxTreeItemId rootItem = tree_->GetRootItem();
+        const bool treeHasMatchingBranch = rootItem.IsOk() &&
+            tree_->GetChildrenCount(rootItem, false) != 0u;
+        if (!filter_->GetValue().empty() && visibleCount == 0u &&
+            !treeHasMatchingBranch) {
+            details_->ChangeValue(
+                wxString("No resources match \"") + filter_->GetValue() +
+                "\".\n\nClear Search or try a broader resource name or file type.");
+            details_->SetInsertionPoint(0);
+            return;
+        }
+
         const NodeData* data = selectedNodeData();
-        if (data == nullptr) {details_->ChangeValue("No matching selection. Select resources or a branch to extract.");return;}
-        wxArrayTreeItemIds selectedItems;tree_->GetSelections(selectedItems);
-        if(selectedItems.size()>1){details_->ChangeValue(wxui::toWx(std::to_string(selectedResources().size())+" matching resources in "+std::to_string(selectedItems.size())+" selected nodes. Overlapping selections are counted once."));return;}
+        if (data == nullptr) {
+            details_->ChangeValue(
+                "Select a resource or branch to view its details and extraction scope.");
+            details_->SetInsertionPoint(0);
+            return;
+        }
+
+        wxArrayTreeItemIds selectedItems;
+        tree_->GetSelections(selectedItems);
         std::ostringstream text;
 
         const auto writeSelectionSummary = [&](const std::vector<ResourceSelection>& selections) {
@@ -2077,117 +2568,127 @@ private:
                 ++extractable;
                 bytes += resourceSize(selection);
             }
-            text << "Resources: " << selections.size() << '\n'
+            const bool filteredScope = !filter_->GetValue().empty();
+            text << (filteredScope ? "Resources in Search scope: " : "Resources: ")
+                 << selections.size() << '\n'
                  << "Extractable: " << extractable << '\n'
-                 << "Extractable bytes: " << bytes << " ("
-                 << neobif::formatByteSize(bytes) << ")\n";
+                 << "Extractable size: " << neobif::formatByteSize(bytes) << '\n';
         };
 
+        if (selectedItems.size() > 1u) {
+            text << "Selection\n"
+                 << "=========\n\n"
+                 << "Selected items: " << selectedItems.size() << '\n';
+            writeSelectionSummary(selectedResources());
+            text << "\nOverlapping branch selections are counted once.";
+            details_->ChangeValue(wxui::toWx(text.str()));
+            details_->SetInsertionPoint(0);
+            return;
+        }
+
         if (data->kind == NodeKind::Root) {
-            text << "KotOR game archive catalog\n"
-                 << "==========================\n\n"
+            std::uint64_t extractableBytes = 0u;
+            for (const auto& resource : archive_.resources()) {
+                if (resource.extractable) extractableBytes += resource.size;
+            }
+            for (const auto& resource : looseArchives_.resources()) {
+                if (resource.extractable) extractableBytes += resource.size;
+            }
+            const std::size_t totalResources =
+                archive_.resources().size() + looseArchives_.resources().size();
+            const std::size_t totalExtractable = archive_.extractableResourceCount() +
+                looseArchives_.extractableResourceCount();
+            text << "Game Session\n"
+                 << "============\n\n"
                  << "Game directory: "
-                 << (scanRoot_.empty() ? archive_.keyPath().parent_path().string()
-                                       : scanRoot_.string()) << '\n'
-                 << "KEY path: " << archive_.keyPath().string() << '\n'
-                 << "KEY build year: " << formatBuildYear(archive_.buildYear()) << '\n'
-                 << "KEY build day-of-year: " << archive_.buildDay() << '\n'
-                 << "BIF entries: " << archive_.bifs().size() << '\n'
-                 << "Missing BIFs: " << archive_.missingBifCount() << '\n'
-                 << "BIF resources: " << archive_.resources().size() << '\n'
-                 << "BIF extractable: " << archive_.extractableResourceCount() << '\n'
-                 << "Standalone archive files: "
-                 << looseArchives_.archives().size() << '\n'
-                 << "Valid standalone archives: " << looseArchives_.validArchiveCount() << '\n'
-                 << "Invalid standalone archives: " << looseArchives_.invalidArchiveCount() << '\n'
-                 << "Standalone resources: " << looseArchives_.resources().size() << '\n'
-                 << "Standalone extractable: "
-                 << looseArchives_.extractableResourceCount() << '\n'
-                 << "Total resources: "
-                 << archive_.resources().size() + looseArchives_.resources().size() << '\n'
-                 << "Total extractable: "
-                 << archive_.extractableResourceCount() +
-                        looseArchives_.extractableResourceCount() << "\n\n";
+                 << neoshared::pathToUtf8(scanRoot_.empty()
+                        ? archive_.keyPath().parent_path() : scanRoot_) << '\n'
+                 << "KEY file: " << neoshared::pathToUtf8(archive_.keyPath()) << '\n'
+                 << "BIF archives: " << archive_.bifs().size() << '\n'
+                 << "Game archives: " << looseArchives_.archives().size() << '\n'
+                 << "Resources: " << totalResources << '\n'
+                 << "Extractable: " << totalExtractable << '\n'
+                 << "Extractable size: " << neobif::formatByteSize(extractableBytes) << '\n';
+            if (!filter_->GetValue().empty()) {
+                text << "Search matches: " << visibleCount << '\n';
+            }
+            if (archive_.missingBifCount() != 0u) {
+                text << "Missing BIFs: " << archive_.missingBifCount() << '\n';
+            }
+            if (looseArchives_.invalidArchiveCount() != 0u) {
+                text << "Invalid game archives: "
+                     << looseArchives_.invalidArchiveCount() << '\n';
+            }
 
             if (!archive_.issues().empty()) {
-                text << "KEY/BIF issues\n"
+                text << "\nKEY/BIF Issues\n"
                      << "--------------\n";
                 const std::size_t limit =
                     std::min<std::size_t>(archive_.issues().size(), 100u);
                 for (std::size_t i = 0; i < limit; ++i) {
                     const auto& issue = archive_.issues()[i];
                     text << (issue.severity == neobif::IssueSeverity::Error
-                                 ? "ERROR" : "WARN")
-                         << ": " << issue.message;
-                    if (issue.bifIndex) text << " [BIF " << *issue.bifIndex << ']';
-                    if (issue.resourceId) {
-                        text << " [" << neobif::hexResourceId(*issue.resourceId) << ']';
-                    }
+                                 ? "Error: " : "Warning: ")
+                         << issue.message;
+                    if (issue.bifIndex) text << " (BIF " << *issue.bifIndex << ')';
                     text << '\n';
                 }
                 if (archive_.issues().size() > limit) {
-                    text << "... " << archive_.issues().size() - limit
-                         << " additional issues\n";
+                    text << archive_.issues().size() - limit
+                         << " additional issues are not shown.\n";
                 }
-                text << '\n';
             }
 
             bool wroteLooseIssues = false;
+            std::size_t looseIssueCount = 0u;
             for (const auto& looseArchive : looseArchives_.archives()) {
                 if (looseArchive.valid && looseArchive.messages.empty()) continue;
                 if (!wroteLooseIssues) {
-                    text << "Standalone archive issues\n"
-                         << "-------------------------\n";
+                    text << "\nGame Archive Issues\n"
+                         << "-------------------\n";
                     wroteLooseIssues = true;
                 }
-                text << looseArchive.relativePath.generic_string() << ":\n";
+                if (looseIssueCount++ >= 100u) continue;
+                text << neoshared::genericPathToUtf8(looseArchive.relativePath) << ":\n";
                 if (!looseArchive.valid && looseArchive.messages.empty()) {
-                    text << "  ERROR: archive is invalid\n";
+                    text << "  Error: archive is invalid\n";
                 }
                 for (const auto& message : looseArchive.messages) {
-                    text << "  " << (looseArchive.valid ? "WARN" : "ERROR")
-                         << ": " << message << '\n';
+                    text << "  " << (looseArchive.valid ? "Warning: " : "Error: ")
+                         << message << '\n';
                 }
+            }
+            if (looseIssueCount > 100u) {
+                text << looseIssueCount - 100u
+                     << " additional archive issue groups are not shown.\n";
             }
         } else if (data->kind == NodeKind::Bif &&
                    data->ownerIndex < archive_.bifs().size()) {
             const auto& bif = archive_.bifs()[data->ownerIndex];
-            text << "BIF entry " << bif.index << "\n"
-                 << "===========" << std::string(std::to_string(bif.index).size(), '=')
-                 << "\n\n"
-                 << "Stored path: " << bif.storedPath << '\n'
-                 << "Resolved path: "
-                 << (bif.resolvedPath.empty() ? "<missing>" : bif.resolvedPath.string())
-                 << '\n'
-                 << "Drive flags: 0x" << std::hex << std::uppercase << bif.driveFlags
-                 << std::dec << '\n'
-                 << "Declared file size: " << bif.declaredFileSize << " ("
-                 << neobif::formatByteSize(bif.declaredFileSize) << ")\n"
-                 << "Actual file size: " << bif.actualFileSize << " ("
-                 << neobif::formatByteSize(bif.actualFileSize) << ")\n"
-                 << "Available: " << yesNo(bif.available) << '\n'
-                 << "Valid BIFF V1 archive: " << yesNo(bif.valid) << '\n'
-                 << "Variable resources: " << bif.variableResourceCount << '\n'
-                 << "Fixed resources: " << bif.fixedResourceCount << '\n'
-                 << "Variable table offset: " << bif.tableOffset << '\n'
-                 << "KEY-linked and orphan resources shown: "
-                 << bif.resourceIndices.size() << "\n";
-            if (!bif.messages.empty()) {
-                text << "\nMessages\n--------\n";
-                for (const auto& message : bif.messages) text << message << '\n';
-            }
+            text << "Stored Path: " << bif.storedPath << '\n'
+                 << "Size: " << neobif::formatByteSize(bif.actualFileSize) << '\n'
+                 << "Resources: " << bif.resourceIndices.size() << '\n';
         } else if (data->kind == NodeKind::LooseRoot) {
-            text << "Game-directory archives\n"
-                 << "=======================\n\n"
-                 << "Scan root: " << scanRoot_.string() << '\n'
-                 << "Supported families: ERF, MOD, SAV, HAK, NWM, RIM\n"
-                 << "Archive files: " << looseArchives_.archives().size() << '\n'
-                 << "Valid archives: " << looseArchives_.validArchiveCount() << '\n'
-                 << "Invalid archives: " << looseArchives_.invalidArchiveCount() << '\n';
+            text << "Game Archives\n"
+                 << "=============\n\n"
+                 << "Root: " << neoshared::pathToUtf8(scanRoot_) << '\n'
+                 << "Archives: " << looseArchives_.archives().size() << '\n';
             writeSelectionSummary(selectedResources());
+            if (looseArchives_.invalidArchiveCount() != 0u) {
+                text << "Invalid archives: " << looseArchives_.invalidArchiveCount() << '\n';
+            }
             if (!looseArchives_.messages().empty()) {
-                text << "\nScan messages\n-------------\n";
-                for (const auto& message : looseArchives_.messages()) text << message << '\n';
+                text << "\nScan Messages\n"
+                     << "-------------\n";
+                const std::size_t limit =
+                    std::min<std::size_t>(looseArchives_.messages().size(), 100u);
+                for (std::size_t i = 0; i < limit; ++i) {
+                    text << looseArchives_.messages()[i] << '\n';
+                }
+                if (looseArchives_.messages().size() > limit) {
+                    text << looseArchives_.messages().size() - limit
+                         << " additional scan messages are not shown.\n";
+                }
             }
         } else if (data->kind == NodeKind::Directory) {
             std::size_t archiveCount = 0u;
@@ -2197,111 +2698,81 @@ private:
                     ++archiveCount;
                 }
             }
-            text << "Archive directory\n"
-                 << "=================\n\n"
-                 << "Relative path: " << data->directoryPath << '\n'
-                 << "Archive files: " << archiveCount << '\n';
+            text << "Archive Folder\n"
+                 << "==============\n\n"
+                 << "Path: " << data->directoryPath << '\n'
+                 << "Archives: " << archiveCount << '\n';
             writeSelectionSummary(selectedResources());
         } else if (data->kind == NodeKind::LooseArchive &&
                    data->ownerIndex < looseArchives_.archives().size()) {
             const auto& looseArchive = looseArchives_.archives()[data->ownerIndex];
-            text << neobif::looseArchiveKindName(looseArchive.kind) << " archive\n"
-                 << "================\n\n"
-                 << "Relative path: " << looseArchive.relativePath.generic_string() << '\n'
-                 << "Resolved path: " << looseArchive.resolvedPath.string() << '\n'
-                 << "Header type: " << looseArchive.fileType << '\n'
-                 << "Version: " << looseArchive.version << '\n'
-                 << "Extended 32-byte ResRefs: "
-                 << yesNo(looseArchive.extendedResrefs) << '\n'
-                 << "File size: " << looseArchive.actualFileSize << " ("
-                 << neobif::formatByteSize(looseArchive.actualFileSize) << ")\n"
-                 << "Declared resources: " << looseArchive.declaredResourceCount << '\n'
-                 << "Indexed resources: " << looseArchive.resourceIndices.size() << '\n'
-                 << "Valid archive: " << yesNo(looseArchive.valid) << '\n';
-            if (looseArchive.kind != neobif::LooseArchiveKind::Rim &&
-                looseArchive.valid) {
-                text << "Build year: " << formatBuildYear(looseArchive.buildYear) << '\n'
-                     << "Build day-of-year: " << looseArchive.buildDay << '\n';
-            }
-            if (!looseArchive.messages.empty()) {
-                text << "\nMessages\n--------\n";
-                for (const auto& message : looseArchive.messages) text << message << '\n';
+            text << "Archive\n"
+                 << "=======\n\n"
+                 << "Path: " << neoshared::genericPathToUtf8(looseArchive.relativePath) << '\n'
+                 << "Type: " << neobif::looseArchiveKindName(looseArchive.kind) << '\n'
+                 << "Size: " << neobif::formatByteSize(looseArchive.actualFileSize) << '\n'
+                 << "Resources: " << looseArchive.resourceIndices.size() << '\n';
+            if (!looseArchive.valid || !looseArchive.messages.empty()) {
+                text << "\nIssues\n"
+                     << "------\n";
+                if (!looseArchive.valid && looseArchive.messages.empty()) {
+                    text << "Archive is invalid.\n";
+                }
+                const std::size_t limit =
+                    std::min<std::size_t>(looseArchive.messages.size(), 100u);
+                for (std::size_t i = 0; i < limit; ++i) {
+                    text << looseArchive.messages[i] << '\n';
+                }
+                if (looseArchive.messages.size() > limit) {
+                    text << looseArchive.messages.size() - limit
+                         << " additional messages are not shown.\n";
+                }
             }
         } else if (data->kind == NodeKind::Type || data->kind == NodeKind::Page) {
-            const auto selections = selectedResources();
-            text << "Resource type\n"
-                 << "=============\n\n"
-                 << "Type: " << neobif::resourceTypeLabel(data->type) << '\n'
-                 << "Source: "
-                 << (data->source == ResourceSource::KeyBif
-                         ? "KEY/BIF archive" : "standalone archive") << '\n';
-            if (data->source == ResourceSource::KeyBif) {
-                text << "BIF index: " << data->ownerIndex << '\n';
-            } else {
-                text << "Standalone archive index: " << data->ownerIndex << '\n';
+            text << (data->kind == NodeKind::Page ? "Resource Page\n=============\n\n"
+                                                  : "File Type\n=========\n\n")
+                 << "Type: ." << neobif::resourceTypeExtension(data->type) << '\n';
+            if (data->source == ResourceSource::KeyBif &&
+                data->ownerIndex < archive_.bifs().size()) {
+                text << "Source: " << archive_.bifs()[data->ownerIndex].storedPath << '\n';
+            } else if (data->source == ResourceSource::LooseArchive &&
+                       data->ownerIndex < looseArchives_.archives().size()) {
+                text << "Source: "
+                     << neoshared::genericPathToUtf8(
+                            looseArchives_.archives()[data->ownerIndex].relativePath) << '\n';
             }
-            writeSelectionSummary(selections);
+            writeSelectionSummary(selectedResources());
         } else if (data->kind == NodeKind::Resource) {
+            text << "Resource\n"
+                 << "========\n\n";
             if (data->source == ResourceSource::KeyBif &&
                 data->resourceIndex < archive_.resources().size()) {
                 const auto& resource = archive_.resources()[data->resourceIndex];
-                const auto* bif = resource.bifIndex < archive_.bifs().size()
-                    ? &archive_.bifs()[resource.bifIndex] : nullptr;
-                text << "BIF resource\n"
-                     << "============\n\n"
-                     << "Name: " << resource.resref << '\n'
-                     << "Output filename: " << resource.fileName() << '\n'
-                     << "Type: " << neobif::resourceTypeLabel(resource.type) << '\n'
-                     << "Resource ID: " << neobif::hexResourceId(resource.resourceId)
-                     << '\n'
-                     << "BIF index: " << resource.bifIndex << '\n'
-                     << "20-bit table index: " << resource.tableIndex << '\n'
-                     << "KotOR 14-bit loader index: " << resource.engineIndex << '\n'
-                     << "Payload offset: " << resource.offset << '\n'
-                     << "Payload size: " << resource.size << " ("
-                     << neobif::formatByteSize(resource.size) << ")\n"
-                     << "Indexed by KEY: " << yesNo(resource.keyed) << '\n'
-                     << "BIF entry found: " << yesNo(resource.bifEntryFound) << '\n'
-                     << "ID matches: " << yesNo(resource.idMatches) << '\n'
-                     << "Type matches: " << yesNo(resource.typeMatches) << '\n'
-                     << "Bounds valid: " << yesNo(resource.boundsValid) << '\n'
-                     << "Extractable: " << yesNo(resource.extractable) << '\n'
-                     << "Status: " << resource.status << '\n';
-                if (bif != nullptr) {
-                    text << "BIF stored path: " << bif->storedPath << '\n'
-                         << "BIF resolved path: "
-                         << (bif->resolvedPath.empty() ? "<missing>"
-                                                      : bif->resolvedPath.string())
+                text << "Filename: " << resource.fileName() << '\n'
+                     << "ResRef: " << resource.resref << '\n'
+                     << "Type: ." << resource.extension << '\n'
+                     << "Size: " << neobif::formatByteSize(resource.size) << '\n';
+                if (resource.bifIndex < archive_.bifs().size()) {
+                    text << "Source: " << archive_.bifs()[resource.bifIndex].storedPath
                          << '\n';
                 }
+                text << "Status: " << resource.status << '\n';
             } else if (data->source == ResourceSource::LooseArchive &&
                        data->resourceIndex < looseArchives_.resources().size()) {
                 const auto& resource = looseArchives_.resources()[data->resourceIndex];
-                const auto* looseArchive =
-                    resource.archiveIndex < looseArchives_.archives().size()
-                        ? &looseArchives_.archives()[resource.archiveIndex] : nullptr;
-                text << "Standalone archive resource\n"
-                     << "===========================\n\n"
-                     << "Name: " << resource.resref << '\n'
-                     << "Output filename: " << resource.fileName() << '\n'
-                     << "Type: " << neobif::resourceTypeLabel(resource.type) << '\n'
-                     << "Resource ID: " << neobif::hexResourceId(resource.resourceId)
-                     << '\n'
-                     << "Archive index: " << resource.archiveIndex << '\n'
-                     << "Payload offset: " << resource.offset << '\n'
-                     << "Payload size: " << resource.size << " ("
-                     << neobif::formatByteSize(resource.size) << ")\n"
-                     << "Bounds valid: " << yesNo(resource.boundsValid) << '\n'
-                     << "Extractable: " << yesNo(resource.extractable) << '\n'
-                     << "Status: " << resource.status << '\n';
-                if (looseArchive != nullptr) {
-                    text << "Archive type: "
-                         << neobif::looseArchiveKindName(looseArchive->kind) << '\n'
-                         << "Archive path: "
-                         << looseArchive->relativePath.generic_string() << '\n';
+                text << "Filename: " << resource.fileName() << '\n'
+                     << "ResRef: " << resource.resref << '\n'
+                     << "Type: ." << resource.extension << '\n'
+                     << "Size: " << neobif::formatByteSize(resource.size) << '\n';
+                if (resource.archiveIndex < looseArchives_.archives().size()) {
+                    text << "Source: "
+                         << neoshared::genericPathToUtf8(
+                                looseArchives_.archives()[resource.archiveIndex].relativePath) << '\n';
                 }
+                text << "Status: " << resource.status << '\n';
             }
         }
+
         details_->ChangeValue(wxui::toWx(text.str()));
         details_->SetInsertionPoint(0);
     }
@@ -2309,8 +2780,8 @@ private:
     void updateStatus() {
         if (!archive_.isOpen()) {
             setModuleStatusText(
-                                "Open chitin.key or scan a KotOR installation", 0);
-            setModuleStatusText( "No archive", 1);
+                                "Open a KotOR game directory or chitin.key", 0);
+            setModuleStatusText("No session", 1);
             return;
         }
         const std::size_t totalResources =
@@ -2318,16 +2789,21 @@ private:
         const std::size_t totalExtractable =
             archive_.extractableResourceCount() + looseArchives_.extractableResourceCount();
         std::ostringstream left;
-        left << totalResources << " resources; " << totalExtractable
-             << " extractable; " << archive_.missingBifCount() << " missing BIFs";
-        setModuleStatusText( left.str(), 0);
+        left << resourceCountText(totalResources) << "; "
+             << totalExtractable << " extractable";
+        setModuleStatusText(left.str(), 0);
         std::ostringstream right;
-        right << archive_.bifs().size() << " BIFs | "
-              << looseArchives_.archives().size() << " standalone archives";
+        right << countText(archive_.bifs().size(), "BIF", "BIFs") << " | "
+              << countText(looseArchives_.archives().size(),
+                           "game archive", "game archives");
+        if (archive_.missingBifCount() != 0u) {
+            right << " | " << countText(archive_.missingBifCount(),
+                                         "missing BIF", "missing BIFs");
+        }
         if (looseArchives_.invalidArchiveCount() != 0u) {
             right << " | " << looseArchives_.invalidArchiveCount() << " invalid";
         }
-        setModuleStatusText( right.str(), 1);
+        setModuleStatusText(right.str(), 1);
     }
 
     void updateCommandState() {
@@ -2335,32 +2811,74 @@ private:
         const bool open = archive_.isOpen();
         const auto selections = open ? selectedResources()
                                      : std::vector<ResourceSelection>{};
-        const bool selectionExtractable = std::any_of(
+        const auto entireSelections = open ? selectedResources(false)
+                                           : std::vector<ResourceSelection>{};
+        const std::size_t extractableSelectionCount = static_cast<std::size_t>(std::count_if(
             selections.begin(), selections.end(),
             [this](const ResourceSelection& selection) {
                 return resourceIsExtractable(selection);
+            }));
+        const bool selectionExtractable = extractableSelectionCount != 0u;
+        const bool entireSelectionExtractable = std::any_of(
+            entireSelections.begin(), entireSelections.end(),
+            [this](const ResourceSelection& selection) {
+                return resourceIsExtractable(selection);
             });
+        const bool filterActive = !filter_->GetValue().empty();
+        const bool scopeNarrowed = filterActive &&
+            selections.size() < entireSelections.size();
         const bool anyExtractable = open &&
             (archive_.extractableResourceCount() != 0u ||
              looseArchives_.extractableResourceCount() != 0u);
+        if (openDirectoryButton_ != nullptr) openDirectoryButton_->Enable(!jobRunning_);
+        if (openFilesButton_ != nullptr) openFilesButton_->Enable(!jobRunning_);
+        if (addBifsButton_ != nullptr) addBifsButton_->Enable(open && !jobRunning_);
         if (extractButton_ != nullptr) {
-            extractButton_->Enable(selectionExtractable);
-            extractButton_->SetLabel(wxui::toWx("Extract "+std::to_string(selections.size())+" matches..."));
+            extractButton_->Enable(selectionExtractable && !jobRunning_);
+            if (!open || selections.empty()) {
+                extractButton_->SetLabel("Extract Selection...");
+                extractButton_->SetToolTip(
+                    "Extract resources represented by the current tree selection. "
+                    "Search narrows branch selections.");
+            } else {
+                const std::size_t count = selections.size();
+                const std::string noun = scopeNarrowed
+                    ? (count == 1u ? " Match" : " Matches")
+                    : (count == 1u ? " Resource" : " Resources");
+                const std::string countText = extractableSelectionCount == count
+                    ? std::to_string(count)
+                    : std::to_string(extractableSelectionCount) + " of " +
+                        std::to_string(count);
+                extractButton_->SetLabel(wxui::toWx(
+                    "Extract " + countText + noun + "..."));
+                std::string tip = "Extract " + std::to_string(extractableSelectionCount) +
+                    (extractableSelectionCount == 1u
+                        ? " extractable resource" : " extractable resources") +
+                    " from the current selection.";
+                if (extractableSelectionCount != count) {
+                    tip += " " + std::to_string(count - extractableSelectionCount) +
+                        (count - extractableSelectionCount == 1u
+                            ? " unavailable resource will be omitted after confirmation."
+                            : " unavailable resources will be omitted after confirmation.");
+                }
+                if (scopeNarrowed) tip += " Search is narrowing this branch.";
+                extractButton_->SetToolTip(wxui::toWx(tip));
+            }
         }
         {
-            enableModuleCommand(ID_Rescan,open);
-            enableModuleCommand(ID_ExtractBranch,open&&selectedNodeData()!=nullptr);
-            enableModuleCommand(ID_ZipBranch,open&&selectedNodeData()!=nullptr);
-            enableModuleCommand(ID_AddBifs, open);
-            enableModuleCommand(ID_CloseArchive, open);
-            enableModuleCommand(ID_ExtractSelected, selectionExtractable);
-            enableModuleCommand(ID_ExtractAll, anyExtractable);
-            enableModuleCommand(ID_ZipSelected, selectionExtractable);
-            enableModuleCommand(ID_ZipAll, anyExtractable);
+            enableModuleCommand(ID_Rescan,open && !jobRunning_);
+            enableModuleCommand(ID_ExtractBranch,scopeNarrowed && entireSelectionExtractable && !jobRunning_);
+            enableModuleCommand(ID_ZipBranch,scopeNarrowed && entireSelectionExtractable && !jobRunning_);
+            enableModuleCommand(ID_AddBifs, open && !jobRunning_);
+            enableModuleCommand(ID_CloseArchive, open && !jobRunning_);
+            enableModuleCommand(ID_ExtractSelected, selectionExtractable && !jobRunning_);
+            enableModuleCommand(ID_ExtractAll, anyExtractable && !jobRunning_);
+            enableModuleCommand(ID_ZipSelected, selectionExtractable && !jobRunning_);
+            enableModuleCommand(ID_ZipAll, anyExtractable && !jobRunning_);
             enableModuleCommand(ID_ExportByType, open && !jobRunning_ &&
                 (!archive_.resources().empty() || !looseArchives_.resources().empty()));
-            enableModuleCommand(ID_ExpandAll, open);
-            enableModuleCommand(ID_CollapseAll, open);
+            enableModuleCommand(ID_ExpandAll, open && !jobRunning_);
+            enableModuleCommand(ID_CollapseAll, open && !jobRunning_);
         }
     }
 
