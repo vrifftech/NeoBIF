@@ -2319,12 +2319,12 @@ private:
         options.existing=policy.GetSelection()==1?neobif::ExistingPolicy::Replace:
             (policy.GetSelection()==2?neobif::ExistingPolicy::KeepBoth:neobif::ExistingPolicy::Skip);
         neobif::ExportPlan plan;
-        if(!runJob("Checking extraction destinations",[&](const neobif::JobControl& job){options.job=job;plan=neobif::planExportItems(items,output,options);}))return;
+        if(!runJob("Checking output names",[&](const neobif::JobControl& job){options.job=job;plan=neobif::planExportItems(items,output,options);}))return;
         std::ostringstream summary;
         summary << countText(plan.writes, "file", "files") << " to write\n"
                 << countText(plan.skipped, "existing file", "existing files") << " to skip\n"
-                << countText(plan.conflicts, "conflicting or unsafe file",
-                             "conflicting or unsafe files") << " not written\n\n"
+                << countText(plan.conflicts, "conflicting or invalid file",
+                             "conflicting or invalid files") << " not written\n\n"
                 << neoshared::pathToUtf8(output);
         const std::size_t messageCount = static_cast<std::size_t>(std::count_if(
             plan.entries.begin(), plan.entries.end(),
@@ -2343,15 +2343,11 @@ private:
         summary << "\n\nContinue with "
                 << (plan.writes == 1u ? "this file?" : "these files?");
         if(wxMessageBox(wxui::toWx(summary.str()),"Confirm extraction scope",wxOK|wxCANCEL|wxICON_QUESTION,this)!=wxOK)return;
-        std::vector<neobif::ExportItem> approved;
-        for(const auto& entry:plan.entries) if(entry.action==neobif::ExportAction::Write) {
-            auto item=items[entry.itemIndex]; item.relativePath=entry.relativePath; approved.push_back(std::move(item));
-        }
-        // Keep-both suffixes were explicitly reviewed; do not generate new names after confirmation.
-        if(options.existing==neobif::ExistingPolicy::KeepBoth) options.existing=neobif::ExistingPolicy::Skip;
         neobif::ExtractionReport report;
-        if(!runJob("Extracting resources",[&](const neobif::JobControl& job){options.job=job;report=neobif::extractExportItems(approved,output,options);}))return;
-        report.failed+=plan.conflicts;
+        if(!runJob("Extracting resources",[&](const neobif::JobControl& job){
+            options.job=job;
+            report=neobif::extractPlannedExportItems(items,plan,output,options);
+        }))return;
         showExtractionResult(report);
 #endif
     }

@@ -1162,10 +1162,9 @@ bool KeyBifArchive::streamResource(std::size_t index, const ByteSink& sink,
     }
     const auto& bif=bifs_[resource.bifIndex];
     if (bif.browserBacked) { error="Use retained browser range access";return false; }
-    if (!unchangedInput(keyPath_,keySnapshot_)) { error="KEY changed after indexing; rescan before extracting";return false; }
-    if (!streamInputRange(bif.resolvedPath,bif.snapshot,resource.offset,resource.size,sink,error,job))return false;
-    if (!unchangedInput(keyPath_,keySnapshot_)) { error="KEY changed during extraction; rescan";return false; }
-    return true;
+    return streamInputRange(
+        bif.resolvedPath, bif.snapshot, resource.offset, resource.size,
+        sink, error, job);
 }
 bool KeyBifArchive::readResource(std::size_t index, std::vector<std::uint8_t>& bytes, std::string& error) const {
     bytes.clear();

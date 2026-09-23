@@ -42,6 +42,12 @@ ExportPlan planExportItems(const std::vector<ExportItem>& items,
 std::vector<std::filesystem::path> makeUniqueExportPaths(
     const std::vector<std::filesystem::path>& paths,
     const std::vector<std::string>& identitySuffixes = {});
+// Executes an already-reviewed plan without scanning destinations again.
+ExtractionReport extractPlannedExportItems(
+    const std::vector<ExportItem>& items,
+    const ExportPlan& plan,
+    const std::filesystem::path& outputDirectory,
+    const ExportOptions& options);
 ExtractionReport extractExportItems(const std::vector<ExportItem>& items,
     const std::filesystem::path& outputDirectory, const ExportOptions& options);
 ExtractionReport extractExportItems(const std::vector<ExportItem>& items,

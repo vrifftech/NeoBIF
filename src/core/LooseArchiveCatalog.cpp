@@ -541,22 +541,7 @@ bool LooseArchiveCatalog::readResource(
     try {
         if (!isNeoBifArchiveFormat(activeReader->disk_format()) ||
             resource.archiveResourceIndex >= activeReader->count()) {
-            error = "Archive layout no longer matches the indexed catalog; reopen the game directory";
-            return false;
-        }
-        const auto& current = activeReader->resource(resource.archiveResourceIndex);
-        const std::uint32_t currentStoredSize =
-            (current.packed_size != 0u || current.data_size == 0u)
-                ? current.packed_size
-                : current.data_size;
-        if (current.resref != resource.resref ||
-            current.filename != resource.storedName ||
-            current.restype != resource.type ||
-            current.resid != resource.resourceId ||
-            current.data_offset != resource.offset ||
-            current.data_size != resource.size ||
-            currentStoredSize != resource.storedSize) {
-            error = "Archive metadata no longer matches the indexed catalog; reopen the game directory";
+            error = "Archive resource index is no longer available";
             return false;
         }
 

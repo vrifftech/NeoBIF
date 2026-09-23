@@ -7,9 +7,8 @@
 #include <vector>
 
 namespace neobif {
-// An exclusively owned sibling staging file. No caller ever truncates/removes
-// the old target. Native POSIX commits are relative to held directory handles;
-// Windows directory handles deny delete/rename and reject reparse points.
+// Lightweight sibling staging output. It avoids partial final files but does
+// not pin directories, compare file identities, or attempt TOCTOU hardening.
 class SafeOutput final {
 public:
     SafeOutput(const std::filesystem::path& root, const std::filesystem::path& relative,
@@ -25,7 +24,7 @@ private:
 };
 
 bool validExportRelativePath(const std::filesystem::path& path);
-// Validates without creating any filesystem objects, returns existing casing.
+// Performs basic relative-path, destination-type, and exact input-path checks.
 std::filesystem::path checkedExportDestination(
     const std::filesystem::path& root, const std::filesystem::path& relative,
     const std::vector<std::filesystem::path>& protectedInputs);
