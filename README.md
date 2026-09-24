@@ -24,12 +24,27 @@ Choose **Export → Export by file type…**, select a type such as **.tga** or 
 Select one or several resources/branches. **Extract N matches** and **Save selected matches as ZIP** operate on the visible filter matches, deduplicating overlapping selections. **Extract entire selected branch** and **Extract all** explicitly ignore the filter. A confirmation shows the actual count. Unavailable/inconsistent entries are identified and not silently exported as healthy files.
 
 
-## Building and tests
+## Build
 
+This repository consumes shared code from the separate `neoshared` repository. Clone the repositories as siblings:
+
+```text
+workspace/
+  neoshared/
+  NeoBIF/
+```
+
+CMake automatically detects `../neoshared`. For another layout, pass `--neoshared-root /path/to/neoshared` to `build.sh` or set `NEOSHARED_ROOT` directly.
+
+Linux GUI build:
 
 ```sh
-cmake -S . -B build -DNEOSHARED_ROOT=../neoshared \
-  -DNEOBIF_BUILD_WX_GUI=ON -DNEOBIF_REQUIRE_WX_GUI=ON -DBUILD_TESTING=ON
-cmake --build build --config Release
-ctest --test-dir build -C Release --output-on-failure
+./scripts/build.sh --wx ON --require-wx ON --jobs "$(nproc)"
 ```
+
+Linux CLI/core-only build:
+
+```sh
+./scripts/build.sh --wx OFF --jobs "$(nproc)"
+```
+
