@@ -6,6 +6,7 @@
 #include <cstdint>
 #include <initializer_list>
 #include <limits>
+#include <optional>
 #include <string>
 #include <string_view>
 #include <vector>
@@ -53,5 +54,12 @@ std::vector<ResourceTypeSummary> summarizeResourceTypes(
 std::vector<ResourceSelection> selectResourceType(
     const KeyBifArchive& archive, const LooseArchiveCatalog& loose,
     std::uint16_t type);
+
+// Resolve one resource from the current game session. Loose game archives
+// take precedence over KEY/BIF resources; callers may layer Override files
+// above this lookup when reproducing an installed-game search path.
+std::optional<ResourceSelection> findResource(
+    const KeyBifArchive& archive, const LooseArchiveCatalog& loose,
+    std::string_view resref, std::uint16_t type);
 
 } // namespace neobif

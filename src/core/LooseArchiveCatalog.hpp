@@ -54,9 +54,10 @@ struct LooseResourceInfo {
     std::size_t archiveResourceIndex{};
     std::string resref;
     // Filename-keyed ERF variants use this full archive leaf name. It is empty
-    // for KotOR/NWN-style ResRef + type archives.
+    // for ResRef + resource-type archives.
     std::string storedName;
     std::uint16_t type{};
+    GameProfile gameProfile{GameProfile::KotOR};
     std::string extension;
     std::uint32_t resourceId{};
     std::uint32_t offset{};
@@ -83,19 +84,24 @@ public:
     LooseArchiveCatalog& operator=(LooseArchiveCatalog&&) noexcept;
 
     bool scan(const std::filesystem::path& root,
-              std::size_t maximumArchives = 8192u, const JobControl& job = {});
+              std::size_t maximumArchives = 8192u, const JobControl& job = {},
+              GameProfile profile = GameProfile::KotOR);
 
     bool openFiles(const std::filesystem::path& root,
-                   const std::vector<std::filesystem::path>& files, const JobControl& job = {});
+                   const std::vector<std::filesystem::path>& files,
+                   const JobControl& job = {},
+                   GameProfile profile = GameProfile::KotOR);
 
     bool openBrowser(const std::filesystem::path& root,
                      const std::vector<BrowserArchiveFile>& files,
                      const BrowserRangeReader& reader,
-                     const BrowserYieldCallback& yield = {});
+                     const BrowserYieldCallback& yield = {},
+                     GameProfile profile = GameProfile::KotOR);
 
     void clear();
 
     bool isOpen() const noexcept { return open_; }
+    GameProfile gameProfile() const noexcept { return gameProfile_; }
     const std::filesystem::path& rootPath() const noexcept { return rootPath_; }
     const std::vector<LooseArchiveInfo>& archives() const noexcept { return archives_; }
     const std::vector<LooseResourceInfo>& resources() const noexcept { return resources_; }
@@ -137,6 +143,7 @@ private:
     std::vector<std::unique_ptr<neoshared::erf::ErfArchive>> archiveReaders_;
     std::vector<std::string> messages_;
     std::string lastError_;
+    GameProfile gameProfile_{GameProfile::KotOR};
     bool open_{};
 };
 

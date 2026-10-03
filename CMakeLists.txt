@@ -11,7 +11,7 @@ include("${CMAKE_CURRENT_LIST_DIR}/cmake/NeoSharedSource.cmake")
 
 if(NOT EXISTS "${NEOSHARED_ROOT}/include/neoshared/ResourceDocument.hpp" OR
    NOT EXISTS "${NEOSHARED_ROOT}/wx/NeoModulePanel.hpp")
-    message(FATAL_ERROR "NeoBIF 1.0.0 requires the matched NeoShared resource/panel API update. Publish the complete current NeoShared source; CI selects main automatically.")
+    message(FATAL_ERROR "NeoBIF 1.1.0 requires the matched NeoShared resource/panel API update. Publish the complete current NeoShared source; CI selects main automatically.")
 endif()
 
 include("${NEOSHARED_ROOT}/cmake/NeoVersion.cmake")
@@ -20,7 +20,7 @@ include("${NEOSHARED_ROOT}/cmake/NeoWasm.cmake")
 neo_read_version_header(NEOBIF_VERSION
     "${CMAKE_CURRENT_LIST_DIR}/src/core/Version.hpp"
     NEOBIF_VERSION_STRING)
-project(NeoBIFCpp VERSION ${NEOBIF_VERSION} DESCRIPTION "C++17/wxWidgets KotOR game archive browser and extractor" LANGUAGES CXX)
+project(NeoBIFCpp VERSION ${NEOBIF_VERSION} DESCRIPTION "C++17/wxWidgets KotOR and Jade Empire archive browser and extractor" LANGUAGES CXX)
 
 if(MSVC AND NOT NEO_HOSTED_BUILD)
     foreach(_neo_runtime_flag_var IN ITEMS
@@ -207,7 +207,7 @@ if(NEOBIF_BUILD_WX_GUI OR NEOBIF_BUILD_WX_MODULE)
         neo_add_windows_version_resource(NeoBIF
             VERSION "${PROJECT_VERSION}"
             PRODUCT_NAME "NeoBIF"
-            FILE_DESCRIPTION "NeoBIF KotOR KEY/BIF archive browser"
+            FILE_DESCRIPTION "NeoBIF KotOR and Jade Empire KEY/BIF archive browser"
             INTERNAL_NAME "NeoBIF"
             ORIGINAL_FILENAME "NeoBIF.exe"
             ICON "${CMAKE_CURRENT_SOURCE_DIR}/resources/neobif.ico")

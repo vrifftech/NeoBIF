@@ -100,7 +100,7 @@ std::vector<ResourceTypeSummary> summarizeResourceTypes(
     std::vector<ResourceTypeSummary> result;
     result.reserve(types.size());
     for (auto& entry : types) {
-        entry.second.extension = resourceTypeExtension(entry.first);
+        entry.second.extension = resourceTypeExtension(entry.first, archive.gameProfile());
         result.push_back(std::move(entry.second));
     }
     std::sort(result.begin(), result.end(), [](const auto& left, const auto& right) {
@@ -121,6 +121,27 @@ std::vector<ResourceSelection> selectResourceType(
         if (resource.type == type) result.push_back({ResourceSource::LooseArchive, resource.index});
     }
     return result;
+}
+
+std::optional<ResourceSelection> findResource(
+    const KeyBifArchive& archive, const LooseArchiveCatalog& loose,
+    std::string_view resref, std::uint16_t type) {
+    std::string wanted = lower(resref);
+    const auto slash = wanted.find_last_of("/\\");
+    if (slash != std::string::npos) wanted.erase(0, slash + 1u);
+    const auto dot = wanted.find_last_of('.');
+    if (dot != std::string::npos) wanted.erase(dot);
+    if (wanted.empty()) return std::nullopt;
+
+    for (auto iterator = loose.resources().rbegin(); iterator != loose.resources().rend(); ++iterator) {
+        if (iterator->type == type && iterator->extractable && lower(iterator->resref) == wanted)
+            return ResourceSelection{ResourceSource::LooseArchive, iterator->index};
+    }
+    for (auto iterator = archive.resources().rbegin(); iterator != archive.resources().rend(); ++iterator) {
+        if (iterator->type == type && iterator->extractable && lower(iterator->resref) == wanted)
+            return ResourceSelection{ResourceSource::KeyBif, iterator->index};
+    }
+    return std::nullopt;
 }
 
 } // namespace neobif

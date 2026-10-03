@@ -169,6 +169,7 @@ int run(int argc, char** argv) {
 
     if (command == "info") {
         std::cout << "KEY: " << archive.keyPath().string() << '\n'
+                  << "Game profile: " << neobif::gameProfileName(archive.gameProfile()) << '\n'
                   << "Build date fields: year=" << archive.buildYear()
                   << " day=" << archive.buildDay() << '\n'
                   << "BIFs: " << archive.bifs().size() << '\n'
@@ -202,7 +203,7 @@ int run(int argc, char** argv) {
             const std::string bifPath = resource.bifIndex < archive.bifs().size()
                 ? archive.bifs()[resource.bifIndex].storedPath : "<invalid>";
             std::cout << bifPath << '\t' << resource.fileName() << '\t'
-                      << neobif::resourceTypeLabel(resource.type) << '\t'
+                      << neobif::resourceTypeLabel(resource.type, archive.gameProfile()) << '\t'
                       << neobif::hexResourceId(resource.resourceId) << '\t'
                       << resource.offset << '\t' << resource.size << '\t'
                       << resource.status << '\n';

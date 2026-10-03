@@ -1,6 +1,8 @@
 #include "core/KeyBifArchive.hpp"
 #include "core/ArchiveExport.hpp"
 
+#include <neoshared/erf/Archive.hpp>
+
 #include <algorithm>
 #include <array>
 #include <cctype>
@@ -37,43 +39,6 @@ constexpr std::size_t kMaximumReportedIssues = 10000u;
 constexpr std::size_t kMaximumCandidateReportedIssues = 256u;
 constexpr std::uint64_t kMaximumNativeKeyBytes = 128u * 1024u * 1024u;
 
-struct ResourceTypeName {
-    std::uint16_t type;
-    const char* extension;
-};
-
-constexpr ResourceTypeName kKotORResourceTypes[] = {
-    {0x0000u, "res"}, {0x0001u, "bmp"}, {0x0002u, "mve"},
-    {0x0003u, "tga"}, {0x0004u, "wav"}, {0x0006u, "plt"},
-    {0x0007u, "ini"}, {0x0008u, "mp3"}, {0x0009u, "mpg"},
-    {0x000Au, "txt"}, {0x000Bu, "wma"}, {0x000Cu, "wmv"},
-    {0x000Du, "xmv"}, {0x000Eu, "log"}, {0x07D0u, "plh"},
-    {0x07D1u, "tex"}, {0x07D2u, "mdl"}, {0x07D3u, "thg"},
-    {0x07D5u, "fnt"}, {0x07D7u, "lua"}, {0x07D8u, "slt"},
-    {0x07D9u, "nss"}, {0x07DAu, "ncs"}, {0x07DBu, "mod"},
-    {0x07DCu, "are"}, {0x07DDu, "set"}, {0x07DEu, "ifo"},
-    {0x07DFu, "bic"}, {0x07E0u, "wok"}, {0x07E1u, "2da"},
-    {0x07E2u, "tlk"}, {0x07E6u, "txi"}, {0x07E7u, "git"},
-    {0x07E8u, "bti"}, {0x07E9u, "uti"}, {0x07EAu, "btc"},
-    {0x07EBu, "utc"}, {0x07EDu, "dlg"}, {0x07EEu, "itp"},
-    {0x07EFu, "btt"}, {0x07F0u, "utt"}, {0x07F1u, "dds"},
-    {0x07F2u, "bts"}, {0x07F3u, "uts"}, {0x07F4u, "ltr"},
-    {0x07F5u, "gff"}, {0x07F6u, "fac"}, {0x07F7u, "bte"},
-    {0x07F8u, "ute"}, {0x07F9u, "btd"}, {0x07FAu, "utd"},
-    {0x07FBu, "btp"}, {0x07FCu, "utp"}, {0x07FDu, "dft"},
-    {0x07FEu, "gic"}, {0x07FFu, "gui"}, {0x0800u, "css"},
-    {0x0801u, "ccs"}, {0x0802u, "btm"}, {0x0803u, "utm"},
-    {0x0804u, "dwk"}, {0x0805u, "pwk"}, {0x0806u, "btg"},
-    {0x0807u, "utg"}, {0x0808u, "jrl"}, {0x0809u, "sav"},
-    {0x080Au, "utw"}, {0x080Bu, "4pc"}, {0x080Cu, "ssf"},
-    {0x080Du, "hak"}, {0x080Eu, "nwm"}, {0x080Fu, "bik"},
-    {0x0BB8u, "lyt"}, {0x0BB9u, "vis"}, {0x0BBAu, "rim"},
-    {0x0BBBu, "pth"}, {0x0BBCu, "lip"}, {0x0BBDu, "bwm"},
-    {0x0BBEu, "txb"}, {0x0BBFu, "tpc"}, {0x0BC0u, "mdx"},
-    {0x0BC1u, "rsv"}, {0x0BC2u, "sig"}, {0x0BC3u, "xbx"},
-    {0x270Du, "erf"}, {0x270Eu, "bif"}, {0x270Fu, "key"},
-};
-
 struct KeyEntry {
     std::string resref;
     std::uint16_t type{};
@@ -92,6 +57,47 @@ struct ParsedBif {
     std::vector<BifVariableEntry> entries;
     std::unordered_map<std::uint32_t, std::size_t> idToIndex;
 };
+
+neoshared::erf::ResourceNameProfile sharedResourceProfile(GameProfile profile) {
+    return profile == GameProfile::JadeEmpire
+        ? neoshared::erf::ResourceNameProfile::JadeEmpire
+        : neoshared::erf::ResourceNameProfile::KotOR;
+}
+
+bool isNumericFallbackExtension(const std::string& extension) {
+    return extension.size() > 1u && extension.front() == '#' &&
+           std::all_of(extension.begin() + 1, extension.end(), [](unsigned char ch) {
+               return std::isdigit(ch) != 0;
+           });
+}
+
+std::string mappedResourceTypeExtension(std::uint16_t type, GameProfile profile) {
+    const std::string extension = neoshared::erf::Resource::res_type_to_string(
+        type, sharedResourceProfile(profile));
+    if (!extension.empty() && !isNumericFallbackExtension(extension)) return extension;
+    std::ostringstream stream;
+    stream << "type_" << std::uppercase << std::hex << std::setw(4)
+           << std::setfill('0') << type;
+    return stream.str();
+}
+
+GameProfile detectGameProfile(const std::vector<KeyEntry>& entries) {
+    // Several IDs have different meanings in KotOR and Jade Empire, so a
+    // mere extension difference is not sufficient evidence. Detect Jade only
+    // when the KEY contains a type defined by Jade's canonical map but absent
+    // from KotOR's map (for example QST, FSM, BIP, or IDS).
+    for (const KeyEntry& entry : entries) {
+        const std::string jade = neoshared::erf::Resource::res_type_to_string(
+            entry.type, neoshared::erf::ResourceNameProfile::JadeEmpire);
+        const std::string kotor = neoshared::erf::Resource::res_type_to_string(
+            entry.type, neoshared::erf::ResourceNameProfile::KotOR);
+        if (!isNumericFallbackExtension(jade) &&
+            isNumericFallbackExtension(kotor)) {
+            return GameProfile::JadeEmpire;
+        }
+    }
+    return GameProfile::KotOR;
+}
 
 std::uint16_t readU16(const std::uint8_t* bytes) {
     return static_cast<std::uint16_t>(bytes[0]) |
@@ -295,6 +301,7 @@ bool buildResourceIndex(const std::vector<KeyEntry>& keyEntries,
                         std::vector<ResourceInfo>& resources,
                         std::vector<ArchiveIssue>& issues,
                         std::string& error,
+                        GameProfile profile,
                         const BrowserYieldCallback& yield = {},
                         std::size_t maximumResources = kMaximumIndexedResources) {
     resources.clear();
@@ -304,7 +311,7 @@ bool buildResourceIndex(const std::vector<KeyEntry>& keyEntries,
         return false;
     }
     resources.reserve(keyEntries.size());
-    std::vector<std::unordered_set<std::uint32_t>> referencedIds(bifs.size());
+    std::vector<std::unordered_set<std::size_t>> referencedEntries(bifs.size());
     std::unordered_map<std::string, std::uint32_t> nameTypeCounts;
     for (std::size_t keyIndex = 0; keyIndex < keyEntries.size(); ++keyIndex) {
         cooperativeYield(yield, keyIndex);
@@ -313,7 +320,7 @@ bool buildResourceIndex(const std::vector<KeyEntry>& keyEntries,
         resource.index = resources.size();
         resource.resref = key.resref;
         resource.type = key.type;
-        resource.extension = resourceTypeExtension(key.type);
+        resource.extension = resourceTypeExtension(key.type, profile);
         resource.resourceId = key.id;
         resource.bifIndex = (key.id >> 20u) & 0x0FFFu;
         resource.tableIndex = key.id & 0x000FFFFFu;
@@ -328,37 +335,46 @@ bool buildResourceIndex(const std::vector<KeyEntry>& keyEntries,
             ParsedBif& parsed = parsedBifs[resource.bifIndex];
             const BifVariableEntry* selected = nullptr;
             std::optional<std::size_t> selectedIndex;
-            bool encodedIndexMismatch = false;
+
+            // KEY ResID low 20 bits identify the variable-resource table row.
+            // BioWare BIFs use both full KEY IDs and local row IDs in the ID
+            // field, so table position is authoritative and the stored ID is
+            // retained only as a consistency diagnostic.
             if (resource.tableIndex < parsed.entries.size()) {
-                const BifVariableEntry& candidate = parsed.entries[resource.tableIndex];
-                if (candidate.id == key.id) {
-                    selected = &candidate;
-                    selectedIndex = resource.tableIndex;
-                } else {
-                    encodedIndexMismatch = true;
-                }
-            }
-            if (selected == nullptr) {
+                selectedIndex = resource.tableIndex;
+                selected = &parsed.entries[*selectedIndex];
+            } else {
+                // Preserve recovery for non-canonical archives whose table was
+                // reordered but whose BIF ID still carries the complete KEY ID.
                 const auto exact = parsed.idToIndex.find(key.id);
                 if (exact != parsed.idToIndex.end()) {
-                    selected = &parsed.entries[exact->second];
                     selectedIndex = exact->second;
+                    selected = &parsed.entries[*selectedIndex];
                 }
             }
-            if (selected != nullptr) {
+
+            if (selected != nullptr && selectedIndex) {
                 resource.bifEntryFound = true;
-                resource.idMatches = true;
+                resource.idMatches = selected->id == key.id ||
+                                     selected->id == resource.tableIndex;
                 resource.typeMatches = selected->type == key.type;
                 resource.offset = selected->offset;
                 resource.size = selected->size;
                 resource.boundsValid = selected->boundsValid;
-                resource.extractable = bif.available && bif.valid && resource.boundsValid && resource.typeMatches;
-                referencedIds[resource.bifIndex].insert(selected->id);
-                if (selectedIndex && *selectedIndex != resource.tableIndex) {
-                    status.push_back("Resource ID was located at BIF table index " +
+                resource.extractable = bif.available && bif.valid &&
+                                       resource.boundsValid && resource.typeMatches;
+                referencedEntries[resource.bifIndex].insert(*selectedIndex);
+                if (*selectedIndex != resource.tableIndex) {
+                    status.push_back("Resource ID was recovered at BIF table index " +
                                      std::to_string(*selectedIndex) +
                                      " instead of encoded index " +
                                      std::to_string(resource.tableIndex));
+                    appendArchiveIssue(issues, {IssueSeverity::Warning, status.back(),
+                                      resource.bifIndex, key.id});
+                }
+                if (!resource.idMatches) {
+                    status.push_back(
+                        "BIF entry ID differs from both the KEY resource ID and local table index; table position used");
                     appendArchiveIssue(issues, {IssueSeverity::Warning, status.back(),
                                       resource.bifIndex, key.id});
                 }
@@ -366,18 +382,19 @@ bool buildResourceIndex(const std::vector<KeyEntry>& keyEntries,
                     status.push_back("Inconsistent BIF/KEY resource type; ordinary extraction disabled");
                     appendArchiveIssue(issues, {IssueSeverity::Error, status.back(), resource.bifIndex, key.id});
                 }
-                if (!resource.boundsValid) status.push_back("Payload overlaps BIF header/tables or lies outside BIF bounds");
+                if (!resource.boundsValid) {
+                    status.push_back("Payload overlaps BIF header/tables or lies outside BIF bounds");
+                }
             } else if (!bif.available) {
                 status.push_back("BIF file is missing");
             } else {
-                status.push_back(encodedIndexMismatch
-                    ? "Encoded BIF table index points to a different resource ID and no exact ID match exists"
-                    : "KEY resource has no matching BIF table entry");
+                status.push_back("KEY resource table index lies outside the BIF variable-resource table");
                 appendArchiveIssue(issues, {IssueSeverity::Error, status.back(), resource.bifIndex, key.id});
             }
             bif.resourceIndices.push_back(resource.index);
         }
-        if (resource.tableIndex != resource.engineIndex) {
+        if (profile == GameProfile::KotOR &&
+            resource.tableIndex != resource.engineIndex) {
             status.push_back("Resource index exceeds the 14-bit index used by the KotOR loader");
             appendArchiveIssue(issues, {IssueSeverity::Warning, status.back(), resource.bifIndex, key.id});
         }
@@ -404,7 +421,7 @@ bool buildResourceIndex(const std::vector<KeyEntry>& keyEntries,
         for (std::size_t entryIndex = 0; entryIndex < parsed.entries.size(); ++entryIndex) {
             cooperativeYield(yield, ++scannedBifEntries);
             const BifVariableEntry& entry = parsed.entries[entryIndex];
-            if (referencedIds[bifIndex].count(entry.id) != 0u) continue;
+            if (referencedEntries[bifIndex].count(entryIndex) != 0u) continue;
             if (resources.size() >= maximumResources) {
                 error = "Combined KEY and unindexed BIF resources exceed the aggregate index limit";
                 resources.clear();
@@ -414,7 +431,7 @@ bool buildResourceIndex(const std::vector<KeyEntry>& keyEntries,
             resource.index = resources.size();
             resource.resref = "resource_" + hexResourceId(entry.id).substr(2);
             resource.type = static_cast<std::uint16_t>(entry.type & 0xFFFFu);
-            resource.extension = resourceTypeExtension(resource.type);
+            resource.extension = resourceTypeExtension(resource.type, profile);
             resource.resourceId = entry.id;
             resource.bifIndex = static_cast<std::uint32_t>(bifIndex);
             resource.tableIndex = static_cast<std::uint32_t>(entryIndex);
@@ -442,26 +459,43 @@ bool buildResourceIndex(const std::vector<KeyEntry>& keyEntries,
 
 } // namespace
 
-std::string resourceTypeExtension(std::uint16_t type) {
-    for (const auto& entry : kKotORResourceTypes) {
-        if (entry.type == type) return entry.extension;
+std::string gameProfileName(GameProfile profile) {
+    switch (profile) {
+    case GameProfile::KotOR: return "KotOR";
+    case GameProfile::JadeEmpire: return "Jade Empire";
     }
-    std::ostringstream stream;
-    stream << "type_" << std::uppercase << std::hex << std::setw(4)
-           << std::setfill('0') << type;
-    return stream.str();
+    return "Unknown";
+}
+
+std::string resourceTypeExtension(std::uint16_t type, GameProfile profile) {
+    return mappedResourceTypeExtension(type, profile);
+}
+
+std::optional<std::uint16_t> resourceTypeFromExtension(
+    std::string extension, GameProfile profile) {
+    extension = lowerAscii(std::move(extension));
+    if (!extension.empty() && extension.front() == '.') extension.erase(extension.begin());
+    if (extension.empty()) return std::nullopt;
+    try {
+        const std::uint16_t type = neoshared::erf::Resource::string_to_res_type(
+            extension, sharedResourceProfile(profile));
+        return type == 0xFFFFu ? std::nullopt
+                              : std::optional<std::uint16_t>{type};
+    } catch (const std::exception&) {
+        return std::nullopt;
+    }
 }
 
 bool isKnownResourceExtension(const std::string& extension) {
-    const auto value = lowerAscii(extension);
-    return std::any_of(std::begin(kKotORResourceTypes), std::end(kKotORResourceTypes),
-        [&value](const ResourceTypeName& entry) { return value == entry.extension; });
+    return resourceTypeFromExtension(extension, GameProfile::KotOR).has_value() ||
+           resourceTypeFromExtension(extension, GameProfile::JadeEmpire).has_value();
 }
 
-std::string resourceTypeLabel(std::uint16_t type) {
+std::string resourceTypeLabel(std::uint16_t type, GameProfile profile) {
     std::ostringstream stream;
-    stream << resourceTypeExtension(type) << " (0x" << std::uppercase << std::hex
-           << std::setw(4) << std::setfill('0') << type << ')';
+    stream << resourceTypeExtension(type, profile) << " (0x"
+           << std::uppercase << std::hex << std::setw(4)
+           << std::setfill('0') << type << ')';
     return stream.str();
 }
 
@@ -506,6 +540,7 @@ void KeyBifArchive::clear() {
     keySnapshot_ = {};
     buildYear_ = 0;
     buildDay_ = 0;
+    gameProfile_ = GameProfile::KotOR;
     bifs_.clear();
     resources_.clear();
     issues_.clear();
@@ -624,6 +659,7 @@ bool KeyBifArchive::open(const std::filesystem::path& keyPath,
         if (key.resref.empty()) key.resref = "unnamed_" + hexResourceId(key.id).substr(2);
         keyEntries.push_back(std::move(key));
     }
+    gameProfile_ = detectGameProfile(keyEntries);
 
     std::vector<ParsedBif> parsedBifs(bifs_.size());
     std::uint64_t aggregateBifRecords = 0;
@@ -699,7 +735,7 @@ bool KeyBifArchive::open(const std::filesystem::path& keyPath,
             continue;
         }
         if (bif.fixedResourceCount != 0u) {
-            bif.messages.push_back("Fixed-resource table is present; KotOR uses variable resources only, so fixed entries are reported but not extracted");
+            bif.messages.push_back("Fixed-resource table is present; supported Odyssey games use variable resources only, so fixed entries are reported but not extracted");
             appendArchiveIssue(issues_, {IssueSeverity::Warning, bif.messages.back(), bifIndex, std::nullopt});
         }
 
@@ -747,7 +783,8 @@ bool KeyBifArchive::open(const std::filesystem::path& keyPath,
     for (const auto& bif : bifs_) if (bif.available && !unchangedInput(bif.resolvedPath, bif.snapshot)) {
         lastError_ = "BIF changed while indexing; rescan: " + bif.resolvedPath.string(); return false;
     }
-    if (!buildResourceIndex(keyEntries, parsedBifs, bifs_, resources_, issues_, lastError_, [&job] { job.check(); })) {
+    if (!buildResourceIndex(keyEntries, parsedBifs, bifs_, resources_, issues_, lastError_,
+                            gameProfile_, [&job] { job.check(); })) {
         return false;
     }
 
@@ -887,6 +924,7 @@ bool KeyBifArchive::openBrowser(const BrowserArchiveFile& keyFile,
         if (key.resref.empty()) key.resref = "unnamed_" + hexResourceId(key.id).substr(2);
         keyEntries.push_back(std::move(key));
     }
+    gameProfile_ = detectGameProfile(keyEntries);
 
     struct CandidateIssue {
         IssueSeverity severity{IssueSeverity::Warning};
@@ -983,7 +1021,7 @@ bool KeyBifArchive::openBrowser(const BrowserArchiveFile& keyFile,
         }
         if (candidate.fixedCount != 0u) {
             appendCandidateIssue(candidate, {IssueSeverity::Warning,
-                "Fixed-resource table is present; KotOR uses variable resources only, so fixed entries are reported but not extracted",
+                "Fixed-resource table is present; supported Odyssey games use variable resources only, so fixed entries are reported but not extracted",
                 std::nullopt});
         }
 
@@ -1132,7 +1170,7 @@ bool KeyBifArchive::openBrowser(const BrowserArchiveFile& keyFile,
     }
 
     if (!buildResourceIndex(
-            keyEntries, parsedBifs, bifs_, resources_, issues_, lastError_, yield,
+            keyEntries, parsedBifs, bifs_, resources_, issues_, lastError_, gameProfile_, yield,
             kMaximumBrowserIndexedResources)) {
         return false;
     }

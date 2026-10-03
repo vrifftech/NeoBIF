@@ -13,6 +13,11 @@
 
 namespace neobif {
 
+enum class GameProfile {
+    KotOR,
+    JadeEmpire,
+};
+
 enum class IssueSeverity {
     Warning,
     Error,
@@ -122,6 +127,7 @@ public:
     const std::filesystem::path& keyPath() const noexcept { return keyPath_; }
     std::uint32_t buildYear() const noexcept { return buildYear_; }
     std::uint32_t buildDay() const noexcept { return buildDay_; }
+    GameProfile gameProfile() const noexcept { return gameProfile_; }
     const std::vector<BifInfo>& bifs() const noexcept { return bifs_; }
     const std::vector<ResourceInfo>& resources() const noexcept { return resources_; }
     const std::vector<ArchiveIssue>& issues() const noexcept { return issues_; }
@@ -163,6 +169,7 @@ private:
     InputSnapshot keySnapshot_;
     std::uint32_t buildYear_{};
     std::uint32_t buildDay_{};
+    GameProfile gameProfile_{GameProfile::KotOR};
     std::vector<BifInfo> bifs_;
     std::vector<ResourceInfo> resources_;
     std::vector<ArchiveIssue> issues_;
@@ -170,8 +177,13 @@ private:
     bool open_{};
 };
 
-std::string resourceTypeExtension(std::uint16_t type);
-std::string resourceTypeLabel(std::uint16_t type);
+std::string gameProfileName(GameProfile profile);
+std::string resourceTypeExtension(
+    std::uint16_t type, GameProfile profile = GameProfile::KotOR);
+std::optional<std::uint16_t> resourceTypeFromExtension(
+    std::string extension, GameProfile profile = GameProfile::KotOR);
+std::string resourceTypeLabel(
+    std::uint16_t type, GameProfile profile = GameProfile::KotOR);
 // The search bar recognizes bare known extensions without a duplicate type table.
 bool isKnownResourceExtension(const std::string& extension);
 std::string formatByteSize(std::uint64_t bytes);

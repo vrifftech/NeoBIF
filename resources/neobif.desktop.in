@@ -1,7 +1,7 @@
 [Desktop Entry]
 Type=Application
 Name=NeoBIF
-Comment=KotOR KEY/BIF archive browser and extractor
+Comment=KotOR and Jade Empire KEY/BIF archive browser and extractor
 Exec=NeoBIF %f
 Icon=neobif
 Terminal=false

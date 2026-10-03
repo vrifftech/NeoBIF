@@ -21,6 +21,12 @@ namespace {
 constexpr std::size_t kMaximumCatalogResources = 1000000u;
 constexpr std::size_t kBrowserYieldInterval = 8u;
 
+neoshared::erf::ResourceNameProfile sharedResourceProfile(GameProfile profile) {
+    return profile == GameProfile::JadeEmpire
+        ? neoshared::erf::ResourceNameProfile::JadeEmpire
+        : neoshared::erf::ResourceNameProfile::KotOR;
+}
+
 std::string lowerAscii(std::string value) {
     std::transform(value.begin(), value.end(), value.begin(), [](unsigned char ch) {
         return static_cast<char>(std::tolower(ch));
@@ -123,15 +129,15 @@ std::uint32_t checkedResourceCount(std::size_t count) {
 bool headerMatchesExtension(LooseArchiveKind headerKind,
                             LooseArchiveKind extensionKind) {
     if (headerKind == extensionKind) return true;
-    // KotOR .sav and .nwm archives use the MOD family header on disk.
+    // Odyssey .sav and .nwm archives can use the MOD family header on disk.
     return headerKind == LooseArchiveKind::Mod &&
            (extensionKind == LooseArchiveKind::Sav ||
             extensionKind == LooseArchiveKind::Nwm);
 }
 
 bool isNeoBifArchiveFormat(neoshared::erf::ArchiveDiskFormat format) {
-    // NeoBIF is a KotOR-style game archive browser. Keep the same V1.0/V1.1
-    // ERF-family and RIM scope it had before the parser was centralized.
+    // NeoBIF is an Odyssey-family game archive browser. Keep the same
+    // V1.0/V1.1 ERF-family and RIM scope used before parser centralization.
     return format == neoshared::erf::ArchiveDiskFormat::ErfV1 ||
            format == neoshared::erf::ArchiveDiskFormat::RimV1;
 }
@@ -139,7 +145,8 @@ bool isNeoBifArchiveFormat(neoshared::erf::ArchiveDiskFormat format) {
 void populateFromSharedArchive(
     LooseArchiveInfo& archive,
     std::vector<LooseResourceInfo>& resources,
-    const neoshared::erf::ErfArchive& reader) {
+    const neoshared::erf::ErfArchive& reader,
+    GameProfile gameProfile) {
     if (!isNeoBifArchiveFormat(reader.disk_format())) {
         throw std::runtime_error(
             "NeoBIF supports ERF-family and RIM V1.0/V1.1 archives. "
@@ -184,6 +191,7 @@ void populateFromSharedArchive(
             resource.resref = source.resref;
             resource.storedName = source.filename;
             resource.type = source.restype;
+            resource.gameProfile = gameProfile;
             resource.extension = source.extension(profile);
             resource.resourceId = source.resid;
             resource.offset = source.data_offset;
@@ -235,7 +243,9 @@ std::string LooseResourceInfo::fileName() const {
     }
 
     std::string stem = sanitizeComponent(resref);
-    std::string ext = extension.empty() ? resourceTypeExtension(type) : extension;
+    std::string ext = extension.empty()
+        ? resourceTypeExtension(type, gameProfile)
+        : extension;
     ext = sanitizeComponent(ext);
     return ext.empty() ? stem : stem + "." + ext;
 }
@@ -264,6 +274,7 @@ void LooseArchiveCatalog::clear() {
     resources_.clear();
     messages_.clear();
     lastError_.clear();
+    gameProfile_ = GameProfile::KotOR;
     open_ = false;
 }
 
@@ -301,7 +312,8 @@ std::vector<std::filesystem::path> LooseArchiveCatalog::scanForArchiveFiles(
 }
 
 bool LooseArchiveCatalog::scan(const std::filesystem::path& root,
-                               std::size_t maximumArchives, const JobControl& job) {
+                               std::size_t maximumArchives, const JobControl& job,
+                               GameProfile profile) {
     clear();
     std::error_code ec;
     if (!std::filesystem::is_directory(root, ec) || ec) {
@@ -316,7 +328,7 @@ bool LooseArchiveCatalog::scan(const std::filesystem::path& root,
     auto files = scanForArchiveFiles(absoluteRoot, probeLimit, job);
     const bool reachedLimit = files.size() > maximumArchives;
     if (reachedLimit) files.resize(maximumArchives);
-    if (!openFiles(absoluteRoot, files, job)) return false;
+    if (!openFiles(absoluteRoot, files, job, profile)) return false;
     if (reachedLimit) {
         messages_.push_back("Standalone archive scan reached the " +
                             std::to_string(maximumArchives) + "-file safety limit");
@@ -326,8 +338,10 @@ bool LooseArchiveCatalog::scan(const std::filesystem::path& root,
 
 bool LooseArchiveCatalog::openFiles(
     const std::filesystem::path& root,
-    const std::vector<std::filesystem::path>& files, const JobControl& job) {
+    const std::vector<std::filesystem::path>& files, const JobControl& job,
+    GameProfile profile) {
     clear();
+    gameProfile_ = profile;
     rootPath_ = std::filesystem::absolute(root).lexically_normal();
     open_ = true;
 
@@ -370,9 +384,9 @@ bool LooseArchiveCatalog::openFiles(
             archive.snapshot = neoshared::erf::capture_regular_file_identity(path);
             sharedArchive = std::make_unique<neoshared::erf::ErfArchive>();
             sharedArchive->set_resource_type_profile(
-                neoshared::erf::ResourceNameProfile::KotOR);
+                sharedResourceProfile(gameProfile_));
             sharedArchive->load(path);
-            populateFromSharedArchive(archive, resources_, *sharedArchive);
+            populateFromSharedArchive(archive, resources_, *sharedArchive, gameProfile_);
             if (!unchangedInput(path, archive.snapshot)) throw std::runtime_error("Archive changed while indexing; rescan");
             // Retain the parsed canonical archive metadata, but release its
             // native descriptor/Windows lock. Resource reads reopen the same
@@ -405,8 +419,10 @@ bool LooseArchiveCatalog::openBrowser(
     const std::filesystem::path& root,
     const std::vector<BrowserArchiveFile>& files,
     const BrowserRangeReader& reader,
-    const BrowserYieldCallback& yield) {
+    const BrowserYieldCallback& yield,
+    GameProfile profile) {
     clear();
+    gameProfile_ = profile;
     rootPath_ = root;
     if (!reader) {
         lastError_ = "Browser archive reader is unavailable";
@@ -472,9 +488,9 @@ bool LooseArchiveCatalog::openBrowser(
 
             sharedArchive = std::make_unique<neoshared::erf::ErfArchive>();
             sharedArchive->set_resource_type_profile(
-                neoshared::erf::ResourceNameProfile::KotOR);
+                sharedResourceProfile(gameProfile_));
             sharedArchive->load_from_reader(browserPath, file.size, std::move(scopedReader));
-            populateFromSharedArchive(archive, resources_, *sharedArchive);
+            populateFromSharedArchive(archive, resources_, *sharedArchive, gameProfile_);
         } catch (const std::exception& exception) {
             archive.valid = false;
             archive.resourceIndices.clear();
@@ -597,8 +613,9 @@ std::filesystem::path LooseArchiveCatalog::outputPath(
     const std::filesystem::path archivePath = safeRelativeArchivePath(archive);
     const std::string file = resource.fileName();
     const std::string type = sanitizeComponent(
-        resource.extension.empty() ? resourceTypeExtension(resource.type)
-                                   : resource.extension);
+        resource.extension.empty()
+            ? resourceTypeExtension(resource.type, resource.gameProfile)
+            : resource.extension);
     switch (layout) {
     case ExtractionLayout::BifAndType:
         return archivePath / type / file;

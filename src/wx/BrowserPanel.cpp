@@ -57,7 +57,7 @@ namespace {
 
 #if !defined(__EMSCRIPTEN__)
 constexpr const char* kArchiveWildcard =
-    "KotOR archive files (*.key;*.bif)|*.key;*.bif|KEY files (*.key)|*.key|BIF files (*.bif)|*.bif|All files (*.*)|*.*";
+    "Odyssey archive files (*.key;*.bif)|*.key;*.bif|KEY files (*.key)|*.key|BIF files (*.bif)|*.bif|All files (*.*)|*.*";
 constexpr const char* kBifWildcard =
     "BIF files (*.bif)|*.bif|All files (*.*)|*.*";
 constexpr const char* kAllFilesWildcard = "All files (*.*)|*.*";
@@ -186,6 +186,25 @@ public:
 
     void setOpenHandler(neobif::ui::OpenHandler handler) override {openHandler_=std::move(handler);}
     std::size_t resourceCount() const override {return archive_.resources().size()+looseArchives_.resources().size();}
+    std::optional<neoshared::ResourceDocument> resolveResource(
+        const std::string& resref, std::uint16_t type) const override {
+        // The hosting API predates game profiles and its callers use KotOR's
+        // canonical numeric IDs. Translate by extension before looking in a
+        // Jade session, where several of the same numbers mean other formats.
+        std::uint16_t sessionType = type;
+        if (archive_.gameProfile() == neobif::GameProfile::JadeEmpire) {
+            const std::string extension =
+                neobif::resourceTypeExtension(type, neobif::GameProfile::KotOR);
+            if (const auto translated = neobif::resourceTypeFromExtension(
+                    extension, archive_.gameProfile())) {
+                sessionType = *translated;
+            }
+        }
+        const auto selected =
+            neobif::findResource(archive_, looseArchives_, resref, sessionType);
+        if(!selected)return std::nullopt;
+        return neobif::readResourceDocument(archive_,looseArchives_,*selected);
+    }
     bool canClose() override {
 #if !defined(__EMSCRIPTEN__)
         if(jobRunning_){cancelJob_.store(true);return false;}
@@ -199,10 +218,19 @@ public:
         return openResource(selected, {});
     }
     std::vector<neobif::ui::OpenTarget> openTargets(const ResourceSelection& selected) const override {
-        if (!canOpen(selected) || !openHandler_.targets || !openHandler_.openWith) return {};
-        const auto type=selected.source==ResourceSource::KeyBif ?
-            archive_.resources()[selected.resourceIndex].type : looseArchives_.resources()[selected.resourceIndex].type;
-        return openHandler_.targets(type);
+        if (!canOpen(selected) || !openHandler_.openWith) return {};
+        if (selected.source == ResourceSource::KeyBif) {
+            const auto& resource = archive_.resources()[selected.resourceIndex];
+            if (openHandler_.extensionTargets)
+                return openHandler_.extensionTargets(resource.extension);
+            return openHandler_.targets ? openHandler_.targets(resource.type)
+                                        : std::vector<neobif::ui::OpenTarget>{};
+        }
+        const auto& resource = looseArchives_.resources()[selected.resourceIndex];
+        if (openHandler_.extensionTargets)
+            return openHandler_.extensionTargets(resource.extension);
+        return openHandler_.targets ? openHandler_.targets(resource.type)
+                                    : std::vector<neobif::ui::OpenTarget>{};
     }
     bool openResource(const ResourceSelection& selected, const std::string& editor) override {
         if(jobRunning_||!canOpen(selected))return false;
@@ -298,10 +326,17 @@ private:
     std::vector<neobif::ui::OpenTarget> contextOpenTargets_;
     std::vector<ResourceSelection> contextOpenSelections_;
     bool canOpen(const ResourceSelection& selected) const {
-        if(!openHandler_.supports||!openHandler_.open||!resourceIsExtractable(selected))return false;
-        const auto type=selected.source==ResourceSource::KeyBif?
-            archive_.resources()[selected.resourceIndex].type:looseArchives_.resources()[selected.resourceIndex].type;
-        return openHandler_.supports(type);
+        if(!openHandler_.open||!resourceIsExtractable(selected))return false;
+        if (selected.source == ResourceSource::KeyBif) {
+            const auto& resource = archive_.resources()[selected.resourceIndex];
+            if (openHandler_.supportsExtension)
+                return openHandler_.supportsExtension(resource.extension);
+            return openHandler_.supports && openHandler_.supports(resource.type);
+        }
+        const auto& resource = looseArchives_.resources()[selected.resourceIndex];
+        if (openHandler_.supportsExtension)
+            return openHandler_.supportsExtension(resource.extension);
+        return openHandler_.supports && openHandler_.supports(resource.type);
     }
     neobif::KeyBifArchive archive_;
     neobif::LooseArchiveCatalog looseArchives_;
@@ -357,7 +392,7 @@ private:
     }
 
     static wxString emptyStateText() {
-        return "Open a KotOR game directory or chitin.key file to browse its resources.\n\n"
+        return "Open a KotOR or Jade Empire game directory, or a chitin.key file to browse its resources.\n\n"
                "Select a resource or branch, then use Extract Selection or save it as a ZIP.";
     }
 
@@ -371,7 +406,9 @@ private:
         }
         const std::filesystem::path displayPath = !scanRoot_.empty() ? scanRoot_ : keyPath_;
         const wxString path = neosettings::pathToWx(displayPath);
-        keyLabel_->SetLabel(wxString(!scanRoot_.empty() ? "Game directory: " : "Archive: ") + path);
+        const std::string prefix = neobif::gameProfileName(archive_.gameProfile()) +
+            (!scanRoot_.empty() ? " game directory: " : " archive: ");
+        keyLabel_->SetLabel(wxui::toWx(prefix) + path);
         keyLabel_->SetToolTip(path);
         keyLabel_->GetParent()->Layout();
     }
@@ -385,8 +422,8 @@ private:
             [this](const neogames::SavedGameDirectory& directory) {
                 scanDirectory(directory.path);
             },
-            neogames::GameDirectoryGameIds{"kotor", "kotor2"},
-            "Open Saved &KotOR Directory");
+            neogames::GameDirectoryGameIds{"kotor", "kotor2", "jade"},
+            "Open Saved &Game Directory");
 #endif
         file->Append(ID_OpenArchive, "Open &chitin.key...\tCtrl+O");
         file->Append(ID_AddBifs, "Add / &Relocate BIF Files...");
@@ -455,7 +492,7 @@ private:
         addBifsButton_ = new wxButton(root, ID_AddBifs, "Add / Relocate BIF Files...");
         extractButton_ = new wxButton(root, ID_ExtractSelected, "Extract Selection...");
         openDirectoryButton_->SetToolTip(
-            "Recommended: select a KotOR installation to index chitin.key, its BIF files, and game archives.");
+            "Recommended: select a KotOR or Jade Empire installation to index chitin.key, its BIF files, and game archives.");
         openFilesButton_->SetToolTip(
             "Open chitin.key directly. Relocated BIF files can be selected in the same operation.");
         addBifsButton_->SetToolTip(
@@ -958,7 +995,7 @@ private:
         const std::uint64_t request = ++browserSelectionRequest_;
         wxWeakRef<NeoBIFPanelImpl> weak(this);
         neobrowser::requestRetainedDirectory(
-            "Select a KotOR game directory",
+            "Select a KotOR or Jade Empire game directory",
             ".key,.bif,.erf,.mod,.sav,.hak,.nwm,.rim",
             [weak, request](neobrowser::RetainedFileSetResult result) mutable {
                 if (!weak) {
@@ -977,7 +1014,7 @@ private:
             initialDirectory = settings_.readPath("Paths/LastGameDirectory").value_or(
                 std::filesystem::path{});
         }
-        wxDirDialog dialog(this, "Select a KotOR game directory",
+        wxDirDialog dialog(this, "Select a KotOR or Jade Empire game directory",
                            neosettings::pathToWx(initialDirectory),
                            wxDD_DEFAULT_STYLE | wxDD_DIR_MUST_EXIST);
         if (dialog.ShowModal() != wxID_OK) return;
@@ -1087,7 +1124,7 @@ private:
         if (incoming.empty()) {
             neobrowser::releaseRetainedFileSet(result.sessionId);
             wxMessageBox("The selection contains no KEY, BIF, ERF, MOD, SAV, HAK, NWM, or RIM files.",
-                         "No KotOR Archives Found", wxOK | wxICON_ERROR, weak.get());
+                         "No Supported Archives Found", wxOK | wxICON_ERROR, weak.get());
             return;
         }
 
@@ -1199,7 +1236,7 @@ private:
             } else {
                 const std::filesystem::path browserRoot =
                     std::filesystem::path(key->relativePath).parent_path();
-                opened = loadedLoose.openBrowser(browserRoot, combined, reader, yield);
+                opened = loadedLoose.openBrowser(browserRoot, combined, reader, yield, loaded.gameProfile());
                 if (!opened) openError = loadedLoose.lastError();
             }
         } catch (const std::exception& exception) {
@@ -1382,7 +1419,7 @@ private:
         neobif::KeyBifArchive loaded;neobif::LooseArchiveCatalog loose;
         if(!runJob("Indexing game archives",[&](const neobif::JobControl& job){
             if(!loaded.open(key,supplementary,mappings,job))throw std::runtime_error(loaded.lastError());
-            if(!loose.scan(scanRoot,8192u,job))throw std::runtime_error(loose.lastError());
+            if(!loose.scan(scanRoot,8192u,job,loaded.gameProfile()))throw std::runtime_error(loose.lastError());
             job.check();
         }))return;
         if(!sameSession) {
@@ -1449,7 +1486,7 @@ private:
                          const neobif::BifInfo& bif,
                          const neobif::ResourceQuery& query) const {
         return query.matches(resource.fileName(), resource.extension,
-            {resource.resref, neobif::resourceTypeLabel(resource.type),
+            {resource.resref, neobif::resourceTypeLabel(resource.type, archive_.gameProfile()),
              neobif::hexResourceId(resource.resourceId), resource.status, bif.storedPath});
     }
 
@@ -1457,7 +1494,7 @@ private:
                               const neobif::LooseArchiveInfo& archive,
                               const neobif::ResourceQuery& query) const {
         return query.matches(resource.fileName(), resource.extension,
-            {resource.resref, neobif::resourceTypeLabel(resource.type),
+            {resource.resref, neobif::resourceTypeLabel(resource.type, archive_.gameProfile()),
              neobif::hexResourceId(resource.resourceId), resource.status,
              neoshared::genericPathToUtf8(archive.relativePath),
              neobif::looseArchiveKindName(archive.kind)});
@@ -1585,7 +1622,7 @@ private:
         std::map<std::uint16_t,std::vector<std::size_t>> groups;
         for(auto index:visible)groups[source==ResourceSource::KeyBif?archive_.resources()[index].type:looseArchives_.resources()[index].type].push_back(index);
         for(const auto& [type,indices]:groups) {
-            const auto node=tree_->AppendItem(parent,wxui::toWx("."+neobif::resourceTypeExtension(type)+" ("+std::to_string(indices.size())+")"), -1,-1,
+            const auto node=tree_->AppendItem(parent,wxui::toWx("."+neobif::resourceTypeExtension(type, archive_.gameProfile())+" ("+std::to_string(indices.size())+")"), -1,-1,
                 new NodeData(NodeKind::Type,owner,kNoIndex,type,source));
             attachResourceList(node,indices);
         }
@@ -1990,10 +2027,10 @@ private:
             }
             if (data->kind == NodeKind::LooseRoot) return "game_archives";
             if (data->kind == NodeKind::Type) {
-                return neobif::resourceTypeExtension(data->type) + "_resources";
+                return neobif::resourceTypeExtension(data->type, archive_.gameProfile()) + "_resources";
             }
             if (data->kind == NodeKind::Page) {
-                return neobif::resourceTypeExtension(data->type) + "_resource_page";
+                return neobif::resourceTypeExtension(data->type, archive_.gameProfile()) + "_resource_page";
             }
         }
         const std::size_t total = archive_.resources().size() + looseArchives_.resources().size();
@@ -2727,7 +2764,7 @@ private:
         } else if (data->kind == NodeKind::Type || data->kind == NodeKind::Page) {
             text << (data->kind == NodeKind::Page ? "Resource Page\n=============\n\n"
                                                   : "File Type\n=========\n\n")
-                 << "Type: ." << neobif::resourceTypeExtension(data->type) << '\n';
+                 << "Type: ." << neobif::resourceTypeExtension(data->type, archive_.gameProfile()) << '\n';
             if (data->source == ResourceSource::KeyBif &&
                 data->ownerIndex < archive_.bifs().size()) {
                 text << "Source: " << archive_.bifs()[data->ownerIndex].storedPath << '\n';
@@ -2776,7 +2813,7 @@ private:
     void updateStatus() {
         if (!archive_.isOpen()) {
             setModuleStatusText(
-                                "Open a KotOR game directory or chitin.key", 0);
+                                "Open a KotOR or Jade Empire game directory, or chitin.key", 0);
             setModuleStatusText("No session", 1);
             return;
         }
@@ -2916,7 +2953,7 @@ private:
 
     void showAbout() {
         const std::string message = std::string("NeoBIF v") + neobif::kVersion +
-            "\n\nKotOR game archive browser and extractor."
+            "\n\nKotOR and Jade Empire game archive browser and extractor."
             "\n\nNeoBIF indexes chitin.key/BIFF resources and recursively catalogs "
             "ERF, MOD, SAV, HAK, NWM, and RIM archives under the game directory. "
             "Every archive, resource type, and individual resource can be extracted "
