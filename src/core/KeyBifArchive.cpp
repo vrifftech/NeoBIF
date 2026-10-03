@@ -207,21 +207,114 @@ void appendUniquePath(std::vector<std::filesystem::path>& paths,
     }
 }
 
+std::string stripDownloadCopySuffix(std::string stem) {
+    for (;;) {
+        if (stem.empty() || stem.back() != ')') break;
+        const auto open = stem.find_last_of('(');
+        if (open == std::string::npos || open + 2u > stem.size()) break;
+        const auto digitsBegin = stem.begin() + static_cast<std::ptrdiff_t>(open + 1u);
+        const auto digitsEnd = stem.end() - 1;
+        if (digitsBegin == digitsEnd ||
+            !std::all_of(digitsBegin, digitsEnd, [](unsigned char ch) {
+                return std::isdigit(ch) != 0;
+            })) {
+            break;
+        }
+        stem.erase(open);
+        while (!stem.empty() && stem.back() == ' ') stem.pop_back();
+    }
+    return stem;
+}
+
+bool matchesDownloadedBifName(const std::filesystem::path& path,
+                              const std::filesystem::path& expectedLeaf) {
+    if (lowerAscii(path.extension().string()) !=
+        lowerAscii(expectedLeaf.extension().string())) {
+        return false;
+    }
+    return lowerAscii(stripDownloadCopySuffix(path.stem().string())) ==
+           lowerAscii(expectedLeaf.stem().string());
+}
+
+bool matchesDeclaredBif(const std::filesystem::path& path,
+                        const std::filesystem::path& expectedLeaf,
+                        std::uint32_t declaredFileSize) {
+    if (declaredFileSize == 0u || !matchesDownloadedBifName(path, expectedLeaf)) {
+        return false;
+    }
+    std::error_code ec;
+    if (!std::filesystem::is_regular_file(path, ec) || ec) return false;
+    const auto size = std::filesystem::file_size(path, ec);
+    if (ec || size != declaredFileSize) return false;
+
+    std::ifstream stream(path, std::ios::binary);
+    if (!stream) return false;
+    std::array<char, 8> header{};
+    stream.read(header.data(), static_cast<std::streamsize>(header.size()));
+    if (!stream) return false;
+    return std::memcmp(header.data(), "BIFF", 4) == 0 &&
+           (std::memcmp(header.data() + 4, "V1  ", 4) == 0 ||
+            std::memcmp(header.data() + 4, "V1.0", 4) == 0);
+}
+
+void appendDeclaredSizeCandidates(
+    std::vector<std::filesystem::path>& matches,
+    const std::filesystem::path& directory,
+    const std::filesystem::path& expectedLeaf,
+    std::uint32_t declaredFileSize) {
+    std::error_code ec;
+    if (!std::filesystem::is_directory(directory, ec) || ec) return;
+    for (std::filesystem::directory_iterator it(
+             directory, std::filesystem::directory_options::skip_permission_denied, ec), end;
+         !ec && it != end; it.increment(ec)) {
+        if (matchesDeclaredBif(it->path(), expectedLeaf, declaredFileSize)) {
+            appendUniquePath(matches, it->path());
+        }
+    }
+}
+
 std::filesystem::path resolveBifPath(
     const std::filesystem::path& keyPath, const std::string& storedPath,
-    std::uint32_t, const std::vector<std::filesystem::path>& supplementaryFiles) {
+    std::uint32_t declaredFileSize,
+    const std::vector<std::filesystem::path>& supplementaryFiles) {
     const auto relative = portableRelativePath(storedPath);
     if (relative.empty()) return {};
     if (auto direct = resolveCaseInsensitive(keyPath.parent_path(), relative)) return *direct;
-    std::vector<std::filesystem::path> matches;
-    if (auto local = resolveCaseInsensitive(keyPath.parent_path(), relative.filename())) appendUniquePath(matches, *local);
+
+    std::vector<std::filesystem::path> nameMatches;
+    if (auto local = resolveCaseInsensitive(keyPath.parent_path(), relative.filename())) {
+        appendUniquePath(nameMatches, *local);
+    }
     for (const auto& file : supplementaryFiles) {
         std::error_code ec;
         if (pathKey(file.filename()) == pathKey(relative.filename()) &&
-            std::filesystem::is_regular_file(file, ec) && !ec) appendUniquePath(matches, file);
+            std::filesystem::is_regular_file(file, ec) && !ec) {
+            appendUniquePath(nameMatches, file);
+        }
     }
-    // Multiple same-name candidates need an explicit KEY-entry-to-file mapping.
-    return matches.size() == 1u ? matches.front() : std::filesystem::path{};
+    if (nameMatches.size() == 1u) return nameMatches.front();
+
+    // File pickers and downloaded archives often append suffixes such as
+    // "(1)" to BIF names. A KEY entry's declared byte size is authoritative
+    // enough to recover a renamed file only when exactly one BIFF candidate
+    // matches. Ambiguous candidates still require explicit relocation.
+    std::vector<std::filesystem::path> sizeMatches;
+    for (const auto& file : supplementaryFiles) {
+        if (matchesDeclaredBif(file, relative.filename(), declaredFileSize)) {
+            appendUniquePath(sizeMatches, file);
+        }
+    }
+    if (sizeMatches.size() == 1u) return sizeMatches.front();
+    if (sizeMatches.size() > 1u) return {};
+
+    const auto storedDirectory = keyPath.parent_path() / relative.parent_path();
+    appendDeclaredSizeCandidates(sizeMatches, storedDirectory, relative.filename(),
+                                 declaredFileSize);
+    if (storedDirectory.lexically_normal() != keyPath.parent_path().lexically_normal()) {
+        appendDeclaredSizeCandidates(sizeMatches, keyPath.parent_path(), relative.filename(),
+                                     declaredFileSize);
+    }
+    return sizeMatches.size() == 1u ? sizeMatches.front() : std::filesystem::path{};
 }
 
 std::string sanitizeComponent(std::string value) {

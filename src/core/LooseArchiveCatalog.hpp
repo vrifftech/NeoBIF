@@ -1,5 +1,8 @@
 #pragma once
 
+#include <map>
+#include <neoshared/game/OverrideAliases.hpp>
+
 #include "core/KeyBifArchive.hpp"
 
 #include <cstddef>
@@ -23,6 +26,7 @@ enum class LooseArchiveKind {
     Nwm,
     Rim,
     Unknown,
+    OverrideDirectory,
 };
 
 struct LooseArchiveInfo {
@@ -45,6 +49,12 @@ struct LooseArchiveInfo {
     bool valid{};
     std::vector<std::size_t> resourceIndices;
     std::vector<std::string> messages;
+
+    // A directory participating in the engine's [ALIAS] override search path.
+    bool overrideDirectory{};
+    std::string overrideAlias;
+    std::filesystem::path overrideIniPath;
+    std::size_t overridePrecedence{};
 };
 
 struct LooseResourceInfo {
@@ -71,6 +81,12 @@ struct LooseResourceInfo {
     std::string status;
 
     std::string fileName() const;
+
+    // Direct loose file stored beneath an override alias rather than inside an archive.
+    bool overrideFile{};
+    std::filesystem::path directPath;
+    InputSnapshot directSnapshot;
+    std::filesystem::path overrideRelativePath;
 };
 
 class LooseArchiveCatalog final {
@@ -131,6 +147,13 @@ public:
     static std::vector<std::filesystem::path> scanForArchiveFiles(
         const std::filesystem::path& root,
         std::size_t maximumResults = 8192u, const JobControl& job = {});
+
+    // Adds every regular file found in the effective [ALIAS] override roots.
+    // Earlier roots retain engine lookup precedence; all files remain visible.
+    bool addOverrideDirectories(
+        const std::vector<neoshared::override_aliases::OverrideRoot>& roots,
+        const std::map<std::string, std::uint16_t>& extensionTypes,
+        const JobControl& job);
 
 private:
     std::filesystem::path rootPath_;

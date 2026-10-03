@@ -1,3 +1,6 @@
+#include <set>
+#include <iterator>
+#include <fstream>
 #include "core/LooseArchiveCatalog.hpp"
 
 #include "core/ArchiveExport.hpp"
@@ -181,7 +184,6 @@ void populateFromSharedArchive(
 
     const std::size_t initialResourceCount = resources.size();
     try {
-        const auto profile = reader.resource_type_profile();
         for (std::size_t localIndex = 0; localIndex < reader.count(); ++localIndex) {
             const auto& source = reader.resource(localIndex);
             LooseResourceInfo resource;
@@ -192,7 +194,7 @@ void populateFromSharedArchive(
             resource.storedName = source.filename;
             resource.type = source.restype;
             resource.gameProfile = gameProfile;
-            resource.extension = source.extension(profile);
+            resource.extension = resourceTypeExtension(source.restype, gameProfile);
             resource.resourceId = source.resid;
             resource.offset = source.data_offset;
             resource.size = source.data_size;
@@ -235,6 +237,9 @@ LooseArchiveCatalog::LooseArchiveCatalog(LooseArchiveCatalog&&) noexcept = defau
 LooseArchiveCatalog& LooseArchiveCatalog::operator=(LooseArchiveCatalog&&) noexcept = default;
 
 std::string LooseResourceInfo::fileName() const {
+    if (overrideFile && !overrideRelativePath.empty())
+        return neoshared::genericPathToUtf8(overrideRelativePath);
+
     if (!storedName.empty()) {
         std::string normalized = storedName;
         std::replace(normalized.begin(), normalized.end(), '\\', '/');
@@ -258,6 +263,7 @@ std::string looseArchiveKindName(LooseArchiveKind kind) {
     case LooseArchiveKind::Hak: return "HAK";
     case LooseArchiveKind::Nwm: return "NWM";
     case LooseArchiveKind::Rim: return "RIM";
+    case LooseArchiveKind::OverrideDirectory: return "Override";
     case LooseArchiveKind::Unknown: return "unknown archive";
     }
     return "unknown archive";
@@ -538,7 +544,43 @@ bool LooseArchiveCatalog::readResource(
         error = "Standalone archive resource index is out of range";
         return false;
     }
+
     const LooseResourceInfo& resource = resources_[resourceIndex];
+    if (resource.overrideFile) {
+        if (!resource.extractable || resource.directPath.empty()) {
+            error = "Override resource is unavailable: " + resource.status;
+            return false;
+        }
+        try {
+            if (!unchangedInput(resource.directPath, resource.directSnapshot)) {
+                error = "Override resource changed while indexed; rescan the session";
+                return false;
+            }
+            std::ifstream input(resource.directPath, std::ios::binary);
+            if (!input) {
+                error = "Unable to open override resource: " +
+                        neoshared::pathToUtf8(resource.directPath);
+                return false;
+            }
+            bytes.resize(resource.size);
+            if (!bytes.empty()) {
+                input.read(reinterpret_cast<char*>(bytes.data()),
+                           static_cast<std::streamsize>(bytes.size()));
+                if (!input) {
+                    error = "Unable to read override resource: " +
+                            neoshared::pathToUtf8(resource.directPath);
+                    bytes.clear();
+                    return false;
+                }
+            }
+            return true;
+        } catch (const std::exception& exception) {
+            error = exception.what();
+            bytes.clear();
+            return false;
+        }
+    }
+
     if (!resource.extractable || resource.archiveIndex >= archives_.size() ||
         resource.archiveIndex >= archiveReaders_.size()) {
         error = "Resource is not extractable: " + resource.status;
@@ -588,6 +630,10 @@ bool LooseArchiveCatalog::streamResource(std::size_t index, const ByteSink& sink
     if (index >= resources_.size()) { error="Invalid resource index";return false; }
     const auto& resource=resources_[index];
     if (!resource.extractable || resource.archiveIndex>=archives_.size()) { error="Resource is unavailable";return false; }
+    if (resource.overrideFile && resource.directRangeExtractable) {
+        return streamInputRange(resource.directPath, resource.directSnapshot, 0u,
+                                resource.size, sink, error, job);
+    }
     const auto& archive=archives_[resource.archiveIndex];
     if (!archive.browserBacked && resource.directRangeExtractable) {
         return streamInputRange(archive.resolvedPath,archive.snapshot,resource.offset,resource.size,sink,error,job);
@@ -648,6 +694,146 @@ std::vector<std::filesystem::path> LooseArchiveCatalog::outputPaths(
         }
     }
     return paths; // Renaming is an explicit export policy, never a reader side effect.
+}
+
+
+bool LooseArchiveCatalog::addOverrideDirectories(
+    const std::vector<neoshared::override_aliases::OverrideRoot>& roots,
+    const std::map<std::string, std::uint16_t>& extensionTypes,
+    const JobControl& job) {
+    try {
+        auto folded = [](std::string value) {
+            std::transform(value.begin(), value.end(), value.begin(), [](unsigned char c) {
+                return static_cast<char>(std::tolower(c));
+            });
+            return value;
+        };
+        auto normalizedKey = [&](const std::filesystem::path& value) {
+            std::error_code ec;
+            auto path = std::filesystem::weakly_canonical(value, ec);
+            if (ec) path = value.lexically_normal();
+            std::string key = path.generic_string();
+#if defined(_WIN32) || defined(__APPLE__)
+            key = folded(std::move(key));
+#endif
+            return key;
+        };
+
+        std::set<std::string> indexedFiles;
+        for (const auto& root : roots) {
+            job.check();
+            LooseArchiveInfo archive{};
+            archive.index = archives_.size();
+            archive.kind = LooseArchiveKind::OverrideDirectory;
+            archive.relativePath = std::filesystem::path("Override") / root.alias;
+            archive.resolvedPath = root.path;
+            archive.browserBacked = false;
+            archive.overrideDirectory = true;
+            archive.overrideAlias = root.alias;
+            archive.overrideIniPath = root.iniPath;
+            archive.overridePrecedence = root.precedence;
+
+            std::error_code ec;
+            archive.valid = std::filesystem::is_directory(root.path, ec) && !ec;
+            const std::size_t archiveIndex = archives_.size();
+            archives_.push_back(std::move(archive));
+            archiveReaders_.push_back(nullptr);
+            if (!archives_[archiveIndex].valid) {
+                archives_[archiveIndex].messages.push_back(
+                    "Override directory is missing or unreadable");
+                continue;
+            }
+
+            std::vector<std::filesystem::path> files;
+            std::filesystem::recursive_directory_iterator it(
+                root.path, std::filesystem::directory_options::skip_permission_denied, ec), end;
+            while (!ec && it != end) {
+                job.check();
+                const auto entry = *it;
+                std::error_code typeError;
+                if (entry.is_symlink(typeError) && entry.is_directory(typeError)) {
+                    it.disable_recursion_pending();
+                } else if (entry.is_regular_file(typeError) && !typeError) {
+                    files.push_back(entry.path());
+                }
+                it.increment(ec);
+            }
+            if (ec) {
+                archives_[archiveIndex].messages.push_back(
+                    "Some override entries could not be enumerated: " + ec.message());
+                ec.clear();
+            }
+            std::sort(files.begin(), files.end(), [&](const auto& left, const auto& right) {
+                return folded(left.generic_string()) < folded(right.generic_string());
+            });
+
+            for (const auto& path : files) {
+                job.check();
+                if (resources_.size() >= kMaximumCatalogResources) {
+                    throw std::runtime_error(
+                        "Combined standalone-archive and override resources exceed the catalog safety limit");
+                }
+                if (!indexedFiles.insert(normalizedKey(path)).second) continue;
+
+                std::error_code relativeError;
+                auto relative = std::filesystem::relative(path, root.path, relativeError);
+                if (relativeError || relative.empty()) relative = path.filename();
+
+                LooseResourceInfo resource{};
+                resource.index = resources_.size();
+                resource.archiveIndex = archiveIndex;
+                resource.gameProfile = gameProfile_;
+                resource.resourceId = static_cast<std::uint32_t>(resource.index & 0xFFFFFFFFu);
+                resource.resref = neoshared::pathToUtf8(path.stem());
+                resource.extension = folded(neoshared::pathToUtf8(path.extension()));
+                if (!resource.extension.empty() && resource.extension.front() == '.') {
+                    resource.extension.erase(resource.extension.begin());
+                }
+                const auto type = extensionTypes.find(resource.extension);
+                resource.type = type == extensionTypes.end()
+                    ? std::numeric_limits<std::uint16_t>::max()
+                    : type->second;
+                resource.overrideFile = true;
+                resource.directPath = path;
+                resource.overrideRelativePath = relative;
+                resource.offset = 0u;
+
+                try {
+                    resource.directSnapshot =
+                        neoshared::erf::capture_regular_file_identity(path);
+                    if (resource.directSnapshot.size >
+                        static_cast<std::uintmax_t>(
+                            std::numeric_limits<std::uint32_t>::max())) {
+                        resource.status = "Unavailable: override file exceeds 4 GiB";
+                    } else {
+                        resource.size = static_cast<std::uint32_t>(
+                            resource.directSnapshot.size);
+                        resource.storedSize = resource.size;
+                        resource.boundsValid = true;
+                        resource.extractable = true;
+                        resource.directRangeExtractable = true;
+                        resource.status = "Ready (override file)";
+                        archives_[archiveIndex].actualFileSize +=
+                            resource.directSnapshot.size;
+                    }
+                } catch (const std::exception& exception) {
+                    resource.status = std::string("Unavailable: ") + exception.what();
+                }
+
+                archives_[archiveIndex].resourceIndices.push_back(resource.index);
+                resources_.push_back(std::move(resource));
+            }
+            archives_[archiveIndex].declaredResourceCount =
+                static_cast<std::uint32_t>(
+                    std::min<std::size_t>(
+                        archives_[archiveIndex].resourceIndices.size(),
+                        std::numeric_limits<std::uint32_t>::max()));
+        }
+        return true;
+    } catch (const std::exception& ex) {
+        lastError_ = ex.what();
+        return false;
+    }
 }
 
 } // namespace neobif

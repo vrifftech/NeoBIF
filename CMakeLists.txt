@@ -11,7 +11,7 @@ include("${CMAKE_CURRENT_LIST_DIR}/cmake/NeoSharedSource.cmake")
 
 if(NOT EXISTS "${NEOSHARED_ROOT}/include/neoshared/ResourceDocument.hpp" OR
    NOT EXISTS "${NEOSHARED_ROOT}/wx/NeoModulePanel.hpp")
-    message(FATAL_ERROR "NeoBIF 1.1.0 requires the matched NeoShared resource/panel API update. Publish the complete current NeoShared source; CI selects main automatically.")
+    message(FATAL_ERROR "NeoBIF 1.2.1 requires the matched NeoShared resource/panel API update. Publish the complete current NeoShared source; CI selects main automatically.")
 endif()
 
 include("${NEOSHARED_ROOT}/cmake/NeoVersion.cmake")

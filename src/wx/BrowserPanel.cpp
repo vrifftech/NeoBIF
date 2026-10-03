@@ -11,6 +11,7 @@
 #include "NeoViewState.hpp"
 #include "NeoWxUi.hpp"
 #include <neoshared/PathUtf8.hpp>
+#include <neoshared/game/OverrideAliases.hpp>
 
 #if defined(__EMSCRIPTEN__)
 #include "NeoBrowserFiles.hpp"
@@ -258,7 +259,7 @@ public:
     bool openDiscoveredArchive(std::size_t index) override {
         if(jobRunning_||!archiveOpen_||index>=looseArchives_.archives().size())return false;
         const auto& entry=looseArchives_.archives()[index];
-        if(!entry.valid||entry.browserBacked)return false;
+        if(!entry.valid||entry.browserBacked||entry.overrideDirectory)return false;
         if(!neobif::unchangedInput(entry.resolvedPath,entry.snapshot))
             throw std::runtime_error("Archive changed since NeoBIF indexed it. Rescan before opening.");
         archiveOpen_(entry.resolvedPath,allInputPaths());return true;
@@ -277,7 +278,8 @@ public:
             const bool enabled = !jobRunning_ &&
                 index < looseArchives_.archives().size() &&
                 looseArchives_.archives()[index].valid &&
-                !looseArchives_.archives()[index].browserBacked;
+                !looseArchives_.archives()[index].browserBacked &&
+                !looseArchives_.archives()[index].overrideDirectory;
             if (enabled) {
                 menu.Append(neobif::ui::kOpenArchiveEditorCommandId, "Open with NeoERF");
                 menu.AppendSeparator();
@@ -392,7 +394,7 @@ private:
     }
 
     static wxString emptyStateText() {
-        return "Open a KotOR or Jade Empire game directory, or a chitin.key file to browse its resources.\n\n"
+        return "Open a game directory or a chitin.key file to browse its resources.\n\n"
                "Select a resource or branch, then use Extract Selection or save it as a ZIP.";
     }
 
@@ -423,7 +425,7 @@ private:
                 scanDirectory(directory.path);
             },
             neogames::GameDirectoryGameIds{"kotor", "kotor2", "jade"},
-            "Open Saved &Game Directory");
+            "Open Saved &Directory");
 #endif
         file->Append(ID_OpenArchive, "Open &chitin.key...\tCtrl+O");
         file->Append(ID_AddBifs, "Add / &Relocate BIF Files...");
@@ -492,7 +494,7 @@ private:
         addBifsButton_ = new wxButton(root, ID_AddBifs, "Add / Relocate BIF Files...");
         extractButton_ = new wxButton(root, ID_ExtractSelected, "Extract Selection...");
         openDirectoryButton_->SetToolTip(
-            "Recommended: select a KotOR or Jade Empire installation to index chitin.key, its BIF files, and game archives.");
+            "Recommended: select a supported game installation to index chitin.key, its BIF files, and game archives.");
         openFilesButton_->SetToolTip(
             "Open chitin.key directly. Relocated BIF files can be selected in the same operation.");
         addBifsButton_->SetToolTip(
@@ -665,11 +667,24 @@ private:
             else event.Skip();
         });
         tree_->Bind(wxEVT_TREE_ITEM_EXPANDING,[this](wxTreeEvent& event){populateNode(event.GetItem());});
-        tree_->Bind(wxEVT_TREE_SEL_CHANGED, [this](wxTreeEvent&) {
-            if(rebuilding_)return;
+        tree_->Bind(wxEVT_TREE_SEL_CHANGED, [this](wxTreeEvent& event) {
+            if (rebuilding_) {
+                event.Skip();
+                return;
+            }
+            const wxTreeItemId item = event.GetItem();
+            if (item.IsOk()) tree_->EnsureVisible(item);
+            wxWeakRef<NeoBIFPanelImpl> weak(this);
+            CallAfter([weak]() {
+                if (!weak || weak->tree_ == nullptr) return;
+                wxArrayTreeItemIds selections;
+                weak->tree_->GetSelections(selections);
+                if (!selections.empty()) weak->tree_->EnsureVisible(selections.back());
+            });
             selectedNodes_.clear();
             showSelectedDetails();
             updateCommandState();
+            event.Skip();
         });
         tree_->Bind(wxEVT_TREE_ITEM_ACTIVATED, [this](wxTreeEvent& event) {
             const wxTreeItemId item = event.GetItem();
@@ -995,7 +1010,7 @@ private:
         const std::uint64_t request = ++browserSelectionRequest_;
         wxWeakRef<NeoBIFPanelImpl> weak(this);
         neobrowser::requestRetainedDirectory(
-            "Select a KotOR or Jade Empire game directory",
+            "Select a game directory",
             ".key,.bif,.erf,.mod,.sav,.hak,.nwm,.rim",
             [weak, request](neobrowser::RetainedFileSetResult result) mutable {
                 if (!weak) {
@@ -1014,7 +1029,7 @@ private:
             initialDirectory = settings_.readPath("Paths/LastGameDirectory").value_or(
                 std::filesystem::path{});
         }
-        wxDirDialog dialog(this, "Select a KotOR or Jade Empire game directory",
+        wxDirDialog dialog(this, "Select a game directory",
                            neosettings::pathToWx(initialDirectory),
                            wxDD_DEFAULT_STYLE | wxDD_DIR_MUST_EXIST);
         if (dialog.ShowModal() != wxID_OK) return;
@@ -1420,6 +1435,20 @@ private:
         if(!runJob("Indexing game archives",[&](const neobif::JobControl& job){
             if(!loaded.open(key,supplementary,mappings,job))throw std::runtime_error(loaded.lastError());
             if(!loose.scan(scanRoot,8192u,job,loaded.gameProfile()))throw std::runtime_error(loose.lastError());
+            std::map<std::string, std::uint16_t> overrideTypes;
+            for (const auto& resource : loaded.resources()) {
+                std::string extension = lowerAscii(resource.extension);
+                if (!extension.empty() && extension.front() == '.') extension.erase(extension.begin());
+                if (!extension.empty()) overrideTypes.emplace(std::move(extension), resource.type);
+            }
+            for (const auto& resource : loose.resources()) {
+                std::string extension = lowerAscii(resource.extension);
+                if (!extension.empty() && extension.front() == '.') extension.erase(extension.begin());
+                if (!extension.empty()) overrideTypes.emplace(std::move(extension), resource.type);
+            }
+            const auto overrideRoots = neoshared::override_aliases::discover(scanRoot);
+            if (!loose.addOverrideDirectories(overrideRoots, overrideTypes, job))
+                throw std::runtime_error(loose.lastError());
             job.check();
         }))return;
         if(!sameSession) {
@@ -2408,7 +2437,9 @@ private:
             return bif.browserBacked?std::filesystem::path(bif.browserRelativePath):bif.resolvedPath;
         }
         if(selection.resourceIndex>=looseArchives_.resources().size())return {};
-        const auto owner=looseArchives_.resources()[selection.resourceIndex].archiveIndex;
+        const auto& resource=looseArchives_.resources()[selection.resourceIndex];
+        if(resource.overrideFile)return resource.directPath;
+        const auto owner=resource.archiveIndex;
         if(owner>=looseArchives_.archives().size())return {};
         const auto& archive=looseArchives_.archives()[owner];
         return archive.browserBacked?std::filesystem::path(archive.browserRelativePath):archive.resolvedPath;
@@ -2813,7 +2844,7 @@ private:
     void updateStatus() {
         if (!archive_.isOpen()) {
             setModuleStatusText(
-                                "Open a KotOR or Jade Empire game directory, or chitin.key", 0);
+                                "Open a game directory or chitin.key", 0);
             setModuleStatusText("No session", 1);
             return;
         }

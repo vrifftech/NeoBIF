@@ -1,3 +1,5 @@
+#include <string_view>
+#include <cctype>
 #include "core/ResourceQuery.hpp"
 
 #include <algorithm>
@@ -126,6 +128,22 @@ std::vector<ResourceSelection> selectResourceType(
 std::optional<ResourceSelection> findResource(
     const KeyBifArchive& archive, const LooseArchiveCatalog& loose,
     std::string_view resref, std::uint16_t type) {
+    // Engine override aliases have lookup precedence over KEY/BIF and mounted archives.
+    const auto sameOverrideName = [](std::string_view left, std::string_view right) {
+        if (left.size() != right.size()) return false;
+        for (std::size_t i = 0; i < left.size(); ++i) {
+            if (std::tolower(static_cast<unsigned char>(left[i])) !=
+                std::tolower(static_cast<unsigned char>(right[i]))) return false;
+        }
+        return true;
+    };
+    for (std::size_t index = 0; index < loose.resources().size(); ++index) {
+        const auto& resource = loose.resources()[index];
+        if (!resource.overrideFile || resource.type != type) continue;
+        if (sameOverrideName(resource.resref, resref))
+            return ResourceSelection{ResourceSource::LooseArchive, index};
+    }
+
     std::string wanted = lower(resref);
     const auto slash = wanted.find_last_of("/\\");
     if (slash != std::string::npos) wanted.erase(0, slash + 1u);
