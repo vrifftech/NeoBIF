@@ -1,9 +1,9 @@
 #pragma once
 #include "NeoModulePanel.hpp"
-#include "core/ResourceQuery.hpp"
+#include <neoshared/bif/ResourceQuery.hpp>
 #include <neoshared/ResourceDocument.hpp>
 namespace neobif::ui {
-inline constexpr unsigned kBrowserApiVersion=5;
+inline constexpr unsigned kBrowserApiVersion=6;
 inline constexpr int kOpenResourceCommandId=wxID_HIGHEST+449;
 inline constexpr int kOpenWithFirstCommandId=wxID_HIGHEST+470;
 inline constexpr int kOpenWithCommandCapacity=16;
@@ -39,14 +39,15 @@ public:
     using Panel::Panel;
     virtual void openPath(const std::filesystem::path& path)=0;
     virtual void setOpenHandler(OpenHandler handler)=0;
-    virtual bool openResource(const ResourceSelection& selection)=0;
-    virtual bool openResource(const ResourceSelection& selection, const std::string& editor)=0;
-    virtual std::vector<OpenTarget> openTargets(const ResourceSelection& selection) const=0;
+    virtual bool openResource(const neoshared::bif::ResourceSelection& selection)=0;
+    virtual bool openResource(const neoshared::bif::ResourceSelection& selection, const std::string& editor)=0;
+    virtual std::vector<OpenTarget> openTargets(const neoshared::bif::ResourceSelection& selection) const=0;
     // Builds the same Open section used by the context menu; no archive reads.
     virtual void appendOpenCommands(wxMenu& menu)=0;
     virtual std::size_t resourceCount() const=0;
     virtual std::optional<neoshared::ResourceDocument> resolveResource(
         const std::string& resref, std::uint16_t type) const=0;
+    virtual neoshared::ResourceResolver captureResourceResolver() const=0;
     using ArchiveOpenHandler=std::function<void(const std::filesystem::path&,std::vector<std::filesystem::path>)>;
     virtual void setArchiveOpenHandler(ArchiveOpenHandler handler)=0;
     virtual bool openDiscoveredArchive(std::size_t index)=0;

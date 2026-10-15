@@ -1,4 +1,4 @@
-#include "core/KeyBifArchive.hpp"
+#include <neoshared/bif/KeyBifArchive.hpp>
 #include "core/ArchiveExport.hpp"
 #include <csignal>
 #include <map>
@@ -55,7 +55,7 @@ neobif::ExtractionLayout parseLayout(const std::string& value) {
     throw std::runtime_error("Unknown output layout: "+value);
 }
 
-std::vector<std::size_t> selectResources(const neobif::KeyBifArchive& archive,
+std::vector<std::size_t> selectResources(const neoshared::bif::KeyBifArchive& archive,
                                          const std::string& filter) {
     std::vector<std::size_t> selected;
     for (const auto& resource : archive.resources()) {
@@ -64,17 +64,17 @@ std::vector<std::size_t> selectResources(const neobif::KeyBifArchive& archive,
         if (containsInsensitive(resource.fileName(), filter) ||
             containsInsensitive(resource.extension, filter) ||
             containsInsensitive(bifPath, filter) ||
-            containsInsensitive(neobif::hexResourceId(resource.resourceId), filter)) {
+            containsInsensitive(neoshared::bif::hexResourceId(resource.resourceId), filter)) {
             selected.push_back(resource.index);
         }
     }
     return selected;
 }
 
-bool openArchive(neobif::KeyBifArchive& archive,
+bool openArchive(neoshared::bif::KeyBifArchive& archive,
                  const std::filesystem::path& key,
                  const std::vector<std::filesystem::path>& bifs,
-                 const std::map<std::size_t,std::filesystem::path>& relocations, const neobif::JobControl& job) {
+                 const std::map<std::size_t,std::filesystem::path>& relocations, const neoshared::bif::JobControl& job) {
     if (archive.open(key, bifs,relocations,job)) return true;
     std::cerr << "error: " << archive.lastError() << '\n';
     return false;
@@ -83,7 +83,7 @@ bool openArchive(neobif::KeyBifArchive& archive,
 } // namespace
 
 int run(int argc, char** argv) {
-    neobif::JobControl job;job.cancelled=[]{return cancelled!=0;};
+    neoshared::bif::JobControl job;job.cancelled=[]{return cancelled!=0;};
     if (argc < 2) {
         usage();
         return 2;
@@ -103,7 +103,7 @@ int run(int argc, char** argv) {
             usage();
             return 2;
         }
-        const auto keys = neobif::KeyBifArchive::scanForKeyFiles(argv[2],64,job);
+        const auto keys = neoshared::bif::KeyBifArchive::scanForKeyFiles(argv[2],64,job);
         for (const auto& key : keys) std::cout << key.string() << '\n';
         return keys.empty() ? 1 : 0;
     }
@@ -164,12 +164,12 @@ int run(int argc, char** argv) {
     }
 
     if(overwrite&&keepBoth)throw std::runtime_error("Choose either --overwrite or --keep-both");
-    neobif::KeyBifArchive archive;
+    neoshared::bif::KeyBifArchive archive;
     if (!openArchive(archive, keyPath, supplementary,relocations,job)) return 1;
 
     if (command == "info") {
         std::cout << "KEY: " << archive.keyPath().string() << '\n'
-                  << "Game profile: " << neobif::gameProfileName(archive.gameProfile()) << '\n'
+                  << "Game profile: " << neoshared::bif::gameProfileName(archive.gameProfile()) << '\n'
                   << "Build date fields: year=" << archive.buildYear()
                   << " day=" << archive.buildDay() << '\n'
                   << "BIFs: " << archive.bifs().size() << '\n'
@@ -185,10 +185,10 @@ int run(int argc, char** argv) {
         if (!archive.issues().empty()) {
             std::cout << "\nIssues:\n";
             for (const auto& issue : archive.issues()) {
-                std::cout << (issue.severity == neobif::IssueSeverity::Error ? "ERROR" : "WARN")
+                std::cout << (issue.severity == neoshared::bif::IssueSeverity::Error ? "ERROR" : "WARN")
                           << ": " << issue.message;
                 if (issue.bifIndex) std::cout << " [BIF " << *issue.bifIndex << ']';
-                if (issue.resourceId) std::cout << " [" << neobif::hexResourceId(*issue.resourceId) << ']';
+                if (issue.resourceId) std::cout << " [" << neoshared::bif::hexResourceId(*issue.resourceId) << ']';
                 std::cout << '\n';
             }
         }
@@ -203,8 +203,8 @@ int run(int argc, char** argv) {
             const std::string bifPath = resource.bifIndex < archive.bifs().size()
                 ? archive.bifs()[resource.bifIndex].storedPath : "<invalid>";
             std::cout << bifPath << '\t' << resource.fileName() << '\t'
-                      << neobif::resourceTypeLabel(resource.type, archive.gameProfile()) << '\t'
-                      << neobif::hexResourceId(resource.resourceId) << '\t'
+                      << neoshared::bif::resourceTypeLabel(resource.type, archive.gameProfile()) << '\t'
+                      << neoshared::bif::hexResourceId(resource.resourceId) << '\t'
                       << resource.offset << '\t' << resource.size << '\t'
                       << resource.status << '\n';
         }
@@ -213,15 +213,15 @@ int run(int argc, char** argv) {
 
     neobif::ExportOptions options;options.job=job;options.protectedInputs=archive.inputPaths();
     options.existing=overwrite?neobif::ExistingPolicy::Replace:(keepBoth?neobif::ExistingPolicy::KeepBoth:neobif::ExistingPolicy::Skip);
-    const auto paths=archive.outputPaths(selected,layout);
+    const auto paths=neobif::archiveOutputPaths(archive,selected,layout);
     std::vector<neobif::ExportItem> items;
     for(std::size_t position=0;position<selected.size();++position) {
         const auto index=selected[position];const auto& resource=archive.resources().at(index);
         if(!resource.extractable) {std::cerr<<"Held unavailable resource: "<<resource.fileName()<<" ("<<resource.status<<")\n";continue;}
         neobif::ExportItem item;item.relativePath=paths.at(position);item.displayName=resource.fileName();
-        item.identitySuffix=neobif::hexResourceId(resource.resourceId);item.expectedSize=resource.size;
+        item.identitySuffix=neoshared::bif::hexResourceId(resource.resourceId);item.expectedSize=resource.size;
         item.sourcePaths={archive.keyPath(),archive.bifs().at(resource.bifIndex).resolvedPath};
-        item.stream=[&archive,index](const neobif::ByteSink& sink,std::string& error,const neobif::JobControl& control){return archive.streamResource(index,sink,error,control);};
+        item.stream=[&archive,index](const neoshared::bif::ByteSink& sink,std::string& error,const neoshared::bif::JobControl& control){return archive.streamResource(index,sink,error,control);};
         items.push_back(std::move(item));
     }
     const auto unavailable=selected.size()-items.size();
@@ -245,6 +245,6 @@ int run(int argc, char** argv) {
 int main(int argc,char** argv) {
     std::signal(SIGINT,cancelSignal);
     try {return run(argc,argv);}
-    catch(const neobif::JobCancelled&) {std::cerr<<"Cancelled; completed files retained.\n";return 130;}
+    catch(const neoshared::bif::JobCancelled&) {std::cerr<<"Cancelled; completed files retained.\n";return 130;}
     catch(const std::exception& ex) {std::cerr<<"error: "<<ex.what()<<'\n';return 1;}
 }

@@ -15,6 +15,13 @@
 #include <unordered_set>
 
 namespace neobif {
+using neoshared::bif::BifInfo;
+using neoshared::bif::ResourceInfo;
+using neoshared::bif::LooseArchiveInfo;
+using neoshared::bif::LooseResourceInfo;
+using neoshared::bif::resourceTypeExtension;
+using neoshared::bif::looseArchiveKindExtension;
+
 namespace {
 
 namespace fs = std::filesystem;
@@ -26,6 +33,102 @@ std::string foldedAscii(std::string value) {
         }
     }
     return value;
+}
+
+std::string sanitizeComponent(std::string value) {
+    for (char& ch : value) {
+        const unsigned char uch = static_cast<unsigned char>(ch);
+        if (uch < 0x20u || ch == '/' || ch == '\\' || ch == ':' || ch == '*' ||
+            ch == '?' || ch == '"' || ch == '<' || ch == '>' || ch == '|') {
+            ch = '_';
+        }
+    }
+    while (!value.empty() && (value.back() == ' ' || value.back() == '.')) value.pop_back();
+    while (!value.empty() && value.front() == ' ') value.erase(value.begin());
+    if (value.empty() || value == "." || value == "..") value = "unnamed";
+
+    static const std::unordered_set<std::string> reserved = {
+        "con", "prn", "aux", "nul", "com1", "com2", "com3", "com4", "com5",
+        "com6", "com7", "com8", "com9", "lpt1", "lpt2", "lpt3", "lpt4",
+        "lpt5", "lpt6", "lpt7", "lpt8", "lpt9"};
+    if (reserved.count(foldedAscii(value)) != 0u) value.insert(value.begin(), '_');
+    return value;
+}
+
+std::filesystem::path portableRelativePath(std::string stored) {
+    std::replace(stored.begin(), stored.end(), '\\', '/');
+    if (stored.size() >= 2u && std::isalpha(static_cast<unsigned char>(stored[0])) &&
+        stored[1] == ':') {
+        stored.erase(0, 2);
+    }
+    while (!stored.empty() && stored.front() == '/') stored.erase(stored.begin());
+
+    std::filesystem::path result;
+    for (const auto& component : std::filesystem::path(stored)) {
+        const std::string text = component.generic_string();
+        if (text.empty() || text == ".") continue;
+        if (text == "..") return {};
+        result /= component;
+    }
+    return result;
+}
+
+std::string bifFolderName(const BifInfo& bif) {
+    std::filesystem::path path = portableRelativePath(bif.storedPath);
+    std::string value = path.stem().string();
+    if (value.empty()) value = "bif_" + std::to_string(bif.index);
+    return sanitizeComponent(value);
+}
+
+std::filesystem::path relativeOutputPath(const ResourceInfo& resource,
+                                         const BifInfo& bif,
+                                         ExtractionLayout layout) {
+    const std::string file = sanitizeComponent(resource.resref) + "." +
+                             sanitizeComponent(resource.extension);
+    const std::string type = sanitizeComponent(resource.extension);
+    const std::string bifName = bifFolderName(bif);
+    switch (layout) {
+    case ExtractionLayout::BifAndType:
+        return std::filesystem::path(bifName) / type / file;
+    case ExtractionLayout::Bif:
+        return std::filesystem::path(bifName) / file;
+    case ExtractionLayout::Type:
+        return std::filesystem::path(type) / file;
+    case ExtractionLayout::Flat:
+        return std::filesystem::path(file);
+    }
+    return std::filesystem::path(file);
+}
+
+std::vector<std::filesystem::path> uniqueOutputPaths(
+    const std::vector<std::size_t>& indices, const std::vector<ResourceInfo>& resources,
+    const std::vector<BifInfo>& bifs, ExtractionLayout layout) {
+    std::vector<std::filesystem::path> result;
+    for (auto index : indices) {
+        if (index >= resources.size() || resources[index].bifIndex >= bifs.size()) result.emplace_back();
+        else result.push_back(relativeOutputPath(resources[index], bifs[resources[index].bifIndex], layout));
+    }
+    return result;
+}
+
+std::filesystem::path safeRelativeArchivePath(const LooseArchiveInfo& archive) {
+    std::filesystem::path input = archive.relativePath;
+    if (input.empty()) input = archive.resolvedPath.filename();
+    std::filesystem::path output;
+    for (const auto& component : input.lexically_normal()) {
+        const std::string value = component.generic_string();
+        if (value.empty() || value == ".") continue;
+        if (value == "..") {
+            output /= "_parent_";
+        } else {
+            output /= sanitizeComponent(value);
+        }
+    }
+    if (output.empty()) {
+        output = "archive_" + std::to_string(archive.index) + "." +
+                 looseArchiveKindExtension(archive.kind);
+    }
+    return output;
 }
 
 std::string nameKey(const fs::path& path) {
@@ -134,11 +237,11 @@ bool targetExists(
 
 bool consume(
     const ExportItem& item,
-    const ByteSink& sink,
+    const neoshared::bif::ByteSink& sink,
     std::string& error,
-    const JobControl& job) {
+    const neoshared::bif::JobControl& job) {
     std::uint64_t count = 0u;
-    const ByteSink checked =
+    const neoshared::bif::ByteSink checked =
         [&](const std::uint8_t* bytes,
             std::size_t size,
             std::string& reason) {
@@ -425,7 +528,7 @@ ExtractionReport extractPlannedExportItems(
                     options.job.check();
                     output.commit();
                     ++report.written;
-                } catch (const JobCancelled&) {
+                } catch (const neoshared::bif::JobCancelled&) {
                     throw;
                 } catch (const std::exception& exception) {
                     ++report.failed;
@@ -443,7 +546,7 @@ ExtractionReport extractPlannedExportItems(
             options.job.update(
                 done, plan.entries.size(), item.displayName);
         }
-    } catch (const JobCancelled&) {
+    } catch (const neoshared::bif::JobCancelled&) {
         report.cancelled = true;
         report.messages.push_back(
             "Cancelled; completed files retained, unfinished output discarded");
@@ -461,7 +564,7 @@ ExtractionReport extractExportItems(
     try {
         const ExportPlan plan = planExportItems(items, root, options);
         return extractPlannedExportItems(items, plan, root, options);
-    } catch (const JobCancelled&) {
+    } catch (const neoshared::bif::JobCancelled&) {
         ExtractionReport report;
         report.cancelled = true;
         return report;
@@ -673,6 +776,38 @@ bool writeExportZip(
         error = exception.what();
         return false;
     }
+}
+
+std::vector<std::filesystem::path> archiveOutputPaths(
+    const neoshared::bif::KeyBifArchive& archive,
+    const std::vector<std::size_t>& indices, ExtractionLayout layout) {
+    return uniqueOutputPaths(indices, archive.resources(), archive.bifs(), layout);
+}
+
+std::filesystem::path archiveOutputPath(
+    const neoshared::bif::LooseArchiveCatalog& catalog, std::size_t resourceIndex,
+    ExtractionLayout layout) {
+    if (resourceIndex >= catalog.resources().size()) return {};
+    const LooseResourceInfo& resource = catalog.resources()[resourceIndex];
+    if (resource.archiveIndex >= catalog.archives().size()) return {};
+    const LooseArchiveInfo& archive = catalog.archives()[resource.archiveIndex];
+    const std::filesystem::path archivePath = safeRelativeArchivePath(archive);
+    const std::string file = resource.fileName();
+    const std::string type = sanitizeComponent(
+        resource.extension.empty()
+            ? resourceTypeExtension(resource.type, resource.gameProfile)
+            : resource.extension);
+    switch (layout) {
+    case ExtractionLayout::BifAndType:
+        return archivePath / type / file;
+    case ExtractionLayout::Bif:
+        return archivePath / file;
+    case ExtractionLayout::Type:
+        return std::filesystem::path(type) / file;
+    case ExtractionLayout::Flat:
+        return std::filesystem::path(file);
+    }
+    return std::filesystem::path(file);
 }
 
 } // namespace neobif

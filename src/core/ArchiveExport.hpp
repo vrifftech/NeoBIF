@@ -1,6 +1,7 @@
 #pragma once
-#include "core/KeyBifArchive.hpp"
-#include "core/JobControl.hpp"
+#include <neoshared/bif/KeyBifArchive.hpp>
+#include <neoshared/bif/LooseArchiveCatalog.hpp>
+#include <neoshared/bif/JobControl.hpp>
 #include <cstdint>
 #include <filesystem>
 #include <functional>
@@ -8,6 +9,23 @@
 #include <vector>
 
 namespace neobif {
+enum class ExtractionLayout { BifAndType, Bif, Type, Flat };
+std::vector<std::filesystem::path> archiveOutputPaths(
+    const neoshared::bif::KeyBifArchive& archive,
+    const std::vector<std::size_t>& indices, ExtractionLayout layout);
+std::filesystem::path archiveOutputPath(
+    const neoshared::bif::LooseArchiveCatalog& catalog,
+    std::size_t resourceIndex, ExtractionLayout layout);
+
+struct ExtractionReport {
+    std::size_t written{};
+    std::size_t skipped{};
+    std::size_t failed{};
+    bool cancelled{};
+    std::vector<std::string> messages;
+};
+
+
 struct ExportItem {
     std::filesystem::path relativePath;
     std::string displayName;
@@ -15,14 +33,14 @@ struct ExportItem {
     std::uint64_t expectedSize{};
     std::function<bool(std::vector<std::uint8_t>&, std::string&)> read;
     std::vector<std::filesystem::path> sourcePaths;
-    std::function<bool(const ByteSink&, std::string&, const JobControl&)> stream;
+    std::function<bool(const neoshared::bif::ByteSink&, std::string&, const neoshared::bif::JobControl&)> stream;
 };
 enum class ExistingPolicy { Skip, Replace, KeepBoth };
 struct ExportOptions {
     ExistingPolicy existing{ExistingPolicy::Skip};
     bool keepDuplicateNames{};
     std::vector<std::filesystem::path> protectedInputs;
-    JobControl job;
+    neoshared::bif::JobControl job;
 };
 enum class ExportAction { Write, Skip, Conflict };
 struct PlannedExport {

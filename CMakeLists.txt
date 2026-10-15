@@ -10,8 +10,9 @@ endif()
 include("${CMAKE_CURRENT_LIST_DIR}/cmake/NeoSharedSource.cmake")
 
 if(NOT EXISTS "${NEOSHARED_ROOT}/include/neoshared/ResourceDocument.hpp" OR
-   NOT EXISTS "${NEOSHARED_ROOT}/wx/NeoModulePanel.hpp")
-    message(FATAL_ERROR "NeoBIF 1.2.1 requires the matched NeoShared resource/panel API update. Publish the complete current NeoShared source; CI selects main automatically.")
+   NOT EXISTS "${NEOSHARED_ROOT}/wx/NeoModulePanel.hpp" OR
+   NOT EXISTS "${NEOSHARED_ROOT}/include/neoshared/bif/KeyBifArchive.hpp")
+    message(FATAL_ERROR "NeoBIF requires matched NeoShared resource, panel and read-only archive APIs.")
 endif()
 
 include("${NEOSHARED_ROOT}/cmake/NeoVersion.cmake")
@@ -79,19 +80,19 @@ if(NOT _neobif_shared_utils MATCHES "same_regular_file_revision")
     message(FATAL_ERROR "NeoBIF requires the matched NeoShared archive-revision safety update. Publish the complete current NeoShared source; CI selects main automatically.")
 endif()
 
+if(NOT TARGET neoshared::bif)
+    message(FATAL_ERROR "NeoBIF requires the matched neoshared::bif reader library.")
+endif()
+
 option(NEOBIF_BUILD_CLI "Build the NeoBIF command-line utility" ON)
 
 add_library(neobif_core
     src/core/SafeOutput.cpp
     src/core/ArchiveExport.cpp
-    src/core/ResourceQuery.cpp
-    src/core/ResourceDocument.cpp
-    src/core/KeyBifArchive.cpp
-    src/core/LooseArchiveCatalog.cpp
 )
 target_include_directories(neobif_core PUBLIC src)
 target_compile_features(neobif_core PUBLIC cxx_std_17)
-target_link_libraries(neobif_core PUBLIC neoshared::erf)
+target_link_libraries(neobif_core PUBLIC neoshared::bif)
 if(EMSCRIPTEN)
     # Exceptions can originate inside the archive core (for example allocation
     # failures) and are caught by the wx/browser transaction boundary.  The

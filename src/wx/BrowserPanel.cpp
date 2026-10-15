@@ -1,10 +1,10 @@
 #include "BrowserPanel.hpp"
-#include "core/ResourceDocument.hpp"
+#include <neoshared/bif/ResourceDocument.hpp>
 #include <wx/wrapsizer.h>
 #include "core/ArchiveExport.hpp"
-#include "core/KeyBifArchive.hpp"
-#include "core/LooseArchiveCatalog.hpp"
-#include "core/ResourceQuery.hpp"
+#include <neoshared/bif/KeyBifArchive.hpp>
+#include <neoshared/bif/LooseArchiveCatalog.hpp>
+#include <neoshared/bif/ResourceQuery.hpp>
 #include "core/Version.hpp"
 #include "NeoGameDirectoryMenu.hpp"
 #include "NeoSettings.hpp"
@@ -78,8 +78,8 @@ bool hasExtension(const std::filesystem::path& path, const std::string& extensio
     return lowerAscii(neoshared::pathToUtf8(path.extension())) == lowerAscii(extension);
 }
 
-using neobif::ResourceSource;
-using neobif::ResourceSelection;
+using neoshared::bif::ResourceSource;
+using neoshared::bif::ResourceSelection;
 
 enum class NodeKind {
     Root,
@@ -98,14 +98,14 @@ public:
              std::size_t owner = kNoIndex,
              std::size_t resource = kNoIndex,
              std::uint16_t resourceType = 0u,
-             ResourceSource resourceSource = ResourceSource::KeyBif,
+             neoshared::bif::ResourceSource resourceSource = neoshared::bif::ResourceSource::KeyBif,
              std::string directory = {})
         : kind(nodeKind), source(resourceSource), ownerIndex(owner),
           resourceIndex(resource), type(resourceType),
           directoryPath(std::move(directory)) {}
 
     NodeKind kind;
-    ResourceSource source;
+    neoshared::bif::ResourceSource source;
     std::size_t ownerIndex;
     std::size_t resourceIndex;
     std::uint16_t type;
@@ -189,22 +189,10 @@ public:
     std::size_t resourceCount() const override {return archive_.resources().size()+looseArchives_.resources().size();}
     std::optional<neoshared::ResourceDocument> resolveResource(
         const std::string& resref, std::uint16_t type) const override {
-        // The hosting API predates game profiles and its callers use KotOR's
-        // canonical numeric IDs. Translate by extension before looking in a
-        // Jade session, where several of the same numbers mean other formats.
-        std::uint16_t sessionType = type;
-        if (archive_.gameProfile() == neobif::GameProfile::JadeEmpire) {
-            const std::string extension =
-                neobif::resourceTypeExtension(type, neobif::GameProfile::KotOR);
-            if (const auto translated = neobif::resourceTypeFromExtension(
-                    extension, archive_.gameProfile())) {
-                sessionType = *translated;
-            }
-        }
-        const auto selected =
-            neobif::findResource(archive_, looseArchives_, resref, sessionType);
-        if(!selected)return std::nullopt;
-        return neobif::readResourceDocument(archive_,looseArchives_,*selected);
+        return neoshared::bif::resolveResourceDocument(archive_,looseArchives_,resref,type);
+    }
+    neoshared::ResourceResolver captureResourceResolver() const override {
+        return neoshared::bif::captureResourceResolver(archive_,looseArchives_);
     }
     bool canClose() override {
 #if !defined(__EMSCRIPTEN__)
@@ -215,12 +203,12 @@ public:
         return true;
     }
     void setAppearance(bool dark,double scale) override {darkMode_=dark;fontScale_=scale;applyDarkMode();}
-    bool openResource(const ResourceSelection& selected) override {
+    bool openResource(const neoshared::bif::ResourceSelection& selected) override {
         return openResource(selected, {});
     }
-    std::vector<neobif::ui::OpenTarget> openTargets(const ResourceSelection& selected) const override {
+    std::vector<neobif::ui::OpenTarget> openTargets(const neoshared::bif::ResourceSelection& selected) const override {
         if (!canOpen(selected) || !openHandler_.openWith) return {};
-        if (selected.source == ResourceSource::KeyBif) {
+        if (selected.source == neoshared::bif::ResourceSource::KeyBif) {
             const auto& resource = archive_.resources()[selected.resourceIndex];
             if (openHandler_.extensionTargets)
                 return openHandler_.extensionTargets(resource.extension);
@@ -233,7 +221,7 @@ public:
         return openHandler_.targets ? openHandler_.targets(resource.type)
                                     : std::vector<neobif::ui::OpenTarget>{};
     }
-    bool openResource(const ResourceSelection& selected, const std::string& editor) override {
+    bool openResource(const neoshared::bif::ResourceSelection& selected, const std::string& editor) override {
         if(jobRunning_||!canOpen(selected))return false;
         if (!editor.empty()) {
             const auto choices=openTargets(selected);
@@ -242,11 +230,11 @@ public:
         try {
             neoshared::ResourceDocument document;
 #if !defined(__EMSCRIPTEN__)
-            if(!runJob("Opening resource",[&](const neobif::JobControl& job){
-                job.check();document=neobif::readResourceDocument(archive_,looseArchives_,selected);job.check();
+            if(!runJob("Opening resource",[&](const neoshared::bif::JobControl& job){
+                job.check();document=neoshared::bif::readResourceDocument(archive_,looseArchives_,selected);job.check();
             }))return false;
 #else
-            document=neobif::readResourceDocument(archive_,looseArchives_,selected);
+            document=neoshared::bif::readResourceDocument(archive_,looseArchives_,selected);
 #endif
             if (editor.empty()) openHandler_.open(std::move(document));
             else openHandler_.openWith(std::move(document),editor);
@@ -260,7 +248,7 @@ public:
         if(jobRunning_||!archiveOpen_||index>=looseArchives_.archives().size())return false;
         const auto& entry=looseArchives_.archives()[index];
         if(!entry.valid||entry.browserBacked||entry.overrideDirectory)return false;
-        if(!neobif::unchangedInput(entry.resolvedPath,entry.snapshot))
+        if(!neoshared::bif::unchangedInput(entry.resolvedPath,entry.snapshot))
             throw std::runtime_error("Archive changed since NeoBIF indexed it. Rescan before opening.");
         archiveOpen_(entry.resolvedPath,allInputPaths());return true;
     }
@@ -326,10 +314,10 @@ private:
     ArchiveOpenHandler archiveOpen_;
     neobif::ui::OpenHandler openHandler_;
     std::vector<neobif::ui::OpenTarget> contextOpenTargets_;
-    std::vector<ResourceSelection> contextOpenSelections_;
-    bool canOpen(const ResourceSelection& selected) const {
+    std::vector<neoshared::bif::ResourceSelection> contextOpenSelections_;
+    bool canOpen(const neoshared::bif::ResourceSelection& selected) const {
         if(!openHandler_.open||!resourceIsExtractable(selected))return false;
-        if (selected.source == ResourceSource::KeyBif) {
+        if (selected.source == neoshared::bif::ResourceSource::KeyBif) {
             const auto& resource = archive_.resources()[selected.resourceIndex];
             if (openHandler_.supportsExtension)
                 return openHandler_.supportsExtension(resource.extension);
@@ -340,13 +328,13 @@ private:
             return openHandler_.supportsExtension(resource.extension);
         return openHandler_.supports && openHandler_.supports(resource.type);
     }
-    neobif::KeyBifArchive archive_;
-    neobif::LooseArchiveCatalog looseArchives_;
+    neoshared::bif::KeyBifArchive archive_;
+    neoshared::bif::LooseArchiveCatalog looseArchives_;
     std::filesystem::path keyPath_;
     std::filesystem::path scanRoot_;
     std::vector<std::filesystem::path> supplementaryFiles_;
 #if defined(__EMSCRIPTEN__)
-    std::vector<neobif::BrowserArchiveFile> browserFiles_;
+    std::vector<neoshared::bif::BrowserArchiveFile> browserFiles_;
     std::vector<std::uint32_t> browserSessions_;
     std::uint64_t browserGeneration_{};
     std::uint64_t browserSelectionRequest_{};
@@ -408,7 +396,7 @@ private:
         }
         const std::filesystem::path displayPath = !scanRoot_.empty() ? scanRoot_ : keyPath_;
         const wxString path = neosettings::pathToWx(displayPath);
-        const std::string prefix = neobif::gameProfileName(archive_.gameProfile()) +
+        const std::string prefix = neoshared::bif::gameProfileName(archive_.gameProfile()) +
             (!scanRoot_.empty() ? " game directory: " : " archive: ");
         keyLabel_->SetLabel(wxui::toWx(prefix) + path);
         keyLabel_->SetToolTip(path);
@@ -701,7 +689,7 @@ private:
             }
             const NodeData* data = selectedNodeData();
             if (data != nullptr && data->kind == NodeKind::Resource) {
-                const ResourceSelection selection{data->source,data->resourceIndex};
+                const neoshared::bif::ResourceSelection selection{data->source,data->resourceIndex};
                 if(canOpen(selection)) openResource(selection);
                 else extractSelected(false);
             }
@@ -727,7 +715,7 @@ private:
         const auto entireSelections = selectedResources(false);
         const auto hasExtractable = [this](const auto& resources) {
             return std::any_of(resources.begin(), resources.end(),
-                [this](const ResourceSelection& resource) {
+                [this](const neoshared::bif::ResourceSelection& resource) {
                     return resourceIsExtractable(resource);
                 });
         };
@@ -1042,7 +1030,7 @@ private:
     void scanDirectory(const std::filesystem::path& directory) {
 #if !defined(__EMSCRIPTEN__)
         std::vector<std::filesystem::path> keys;
-        if(!runJob("Finding chitin.key",[&](const neobif::JobControl& job){keys=neobif::KeyBifArchive::scanForKeyFiles(directory,128u,job);}))return;
+        if(!runJob("Finding chitin.key",[&](const neoshared::bif::JobControl& job){keys=neoshared::bif::KeyBifArchive::scanForKeyFiles(directory,128u,job);}))return;
         if (keys.empty()) {
             wxMessageBox("No chitin.key file was found under the selected directory.",
                          "No KEY Archive Found", wxOK | wxICON_ERROR, this);
@@ -1068,10 +1056,10 @@ private:
         return static_cast<std::size_t>(std::count(path.begin(), path.end(), '/'));
     }
 
-    static std::optional<neobif::BrowserArchiveFile> selectBrowserKey(
-        const std::vector<neobif::BrowserArchiveFile>& files,
+    static std::optional<neoshared::bif::BrowserArchiveFile> selectBrowserKey(
+        const std::vector<neoshared::bif::BrowserArchiveFile>& files,
         std::string& error) {
-        std::vector<neobif::BrowserArchiveFile> candidates;
+        std::vector<neoshared::bif::BrowserArchiveFile> candidates;
         for (const auto& file : files) {
             const std::filesystem::path path(file.relativePath);
             if (hasExtension(path, ".key")) candidates.push_back(file);
@@ -1123,15 +1111,15 @@ private:
         }
         if (result.cancelled()) return;
 
-        std::vector<neobif::BrowserArchiveFile> incoming;
+        std::vector<neoshared::bif::BrowserArchiveFile> incoming;
         incoming.reserve(result.files.size());
         for (const auto& file : result.files) {
             const std::filesystem::path path(file.relativePath);
             if (!hasExtension(path, ".key") && !hasExtension(path, ".bif") &&
-                !neobif::LooseArchiveCatalog::hasSupportedExtension(path)) {
+                !neoshared::bif::LooseArchiveCatalog::hasSupportedExtension(path)) {
                 continue;
             }
-            neobif::BrowserArchiveFile selected;
+            neoshared::bif::BrowserArchiveFile selected;
             selected.sessionId=result.sessionId; selected.fileId=file.fileId;
             selected.relativePath=file.relativePath; selected.size=file.size;
             incoming.push_back(std::move(selected));
@@ -1143,7 +1131,7 @@ private:
             return;
         }
 
-        std::vector<neobif::BrowserArchiveFile> combined;
+        std::vector<neoshared::bif::BrowserArchiveFile> combined;
         const std::uint64_t generation = weak->browserGeneration_;
         if (appendBifs) {
             combined = weak->browserFiles_;
@@ -1227,9 +1215,9 @@ private:
         if (weak->filterTimer_.IsRunning()) weak->flushSearch();
         weak->browserIndexing_ = true;
         weak->Enable(false);
-        neobif::KeyBifArchive loaded;
-        neobif::LooseArchiveCatalog loadedLoose;
-        const auto reader = [](const neobif::BrowserArchiveFile& file,
+        neoshared::bif::KeyBifArchive loaded;
+        neoshared::bif::LooseArchiveCatalog loadedLoose;
+        const auto reader = [](const neoshared::bif::BrowserArchiveFile& file,
                                std::uint64_t offset,
                                std::size_t length,
                                std::vector<std::uint8_t>& bytes,
@@ -1242,7 +1230,7 @@ private:
         try {
             wxProgressDialog progress("Indexing game archives","Reading KEY/BIF and game-directory archive tables...",100,weak.get(),wxPD_APP_MODAL|wxPD_CAN_ABORT|wxPD_ELAPSED_TIME);
             const auto yield = [&progress] {
-                if(!progress.Pulse())throw neobif::JobCancelled();
+                if(!progress.Pulse())throw neoshared::bif::JobCancelled();
                 emscripten_sleep(0);
             };
             opened = loaded.openBrowser(*key, combined, reader, yield);
@@ -1316,7 +1304,7 @@ private:
             return;
         }
 
-        std::vector<neobif::BrowserArchiveFile> activeFiles;
+        std::vector<neoshared::bif::BrowserArchiveFile> activeFiles;
         std::set<BrowserFileKey> emittedFiles;
         std::map<std::uint32_t, std::vector<std::uint32_t>> retainedIdsBySession;
         for (auto file : combined) {
@@ -1394,7 +1382,7 @@ private:
         std::atomic<bool> finished{false};
         std::mutex mutex;std::string detail="Preparing...";std::size_t done=0,total=0;
         std::exception_ptr failure;
-        neobif::JobControl control;
+        neoshared::bif::JobControl control;
         control.cancelled=[this]{return cancelJob_.load();};
         control.progress=[&](std::size_t current,std::size_t count,const std::string& text){std::lock_guard<std::mutex> lock(mutex);done=current;total=count;detail=text;};
         wxProgressDialog dialog(title,"Preparing...",1000,this,wxPD_APP_MODAL|wxPD_CAN_ABORT|wxPD_ELAPSED_TIME|wxPD_AUTO_HIDE);
@@ -1413,7 +1401,7 @@ private:
         worker.join();dialog.Update(1000);jobRunning_=false;
         if(failure) {
             try{std::rethrow_exception(failure);}
-            catch(const neobif::JobCancelled&){setModuleStatusText("Operation cancelled; current session retained");return false;}
+            catch(const neoshared::bif::JobCancelled&){setModuleStatusText("Operation cancelled; current session retained");return false;}
             catch(const std::exception& ex){wxMessageBox(wxui::toWx(ex.what()),title,wxOK|wxICON_ERROR,this);return false;}
         }
         return true;
@@ -1431,8 +1419,8 @@ private:
         if(scanRoot.empty())scanRoot=key.parent_path();
         if(scanRoot.empty())scanRoot=std::filesystem::current_path();
         scanRoot=std::filesystem::absolute(scanRoot).lexically_normal();
-        neobif::KeyBifArchive loaded;neobif::LooseArchiveCatalog loose;
-        if(!runJob("Indexing game archives",[&](const neobif::JobControl& job){
+        neoshared::bif::KeyBifArchive loaded;neoshared::bif::LooseArchiveCatalog loose;
+        if(!runJob("Indexing game archives",[&](const neoshared::bif::JobControl& job){
             if(!loaded.open(key,supplementary,mappings,job))throw std::runtime_error(loaded.lastError());
             if(!loose.scan(scanRoot,8192u,job,loaded.gameProfile()))throw std::runtime_error(loose.lastError());
             std::map<std::string, std::uint16_t> overrideTypes;
@@ -1511,22 +1499,22 @@ private:
         rebuildTree();
     }
 
-    bool resourceMatches(const neobif::ResourceInfo& resource,
-                         const neobif::BifInfo& bif,
-                         const neobif::ResourceQuery& query) const {
+    bool resourceMatches(const neoshared::bif::ResourceInfo& resource,
+                         const neoshared::bif::BifInfo& bif,
+                         const neoshared::bif::ResourceQuery& query) const {
         return query.matches(resource.fileName(), resource.extension,
-            {resource.resref, neobif::resourceTypeLabel(resource.type, archive_.gameProfile()),
-             neobif::hexResourceId(resource.resourceId), resource.status, bif.storedPath});
+            {resource.resref, neoshared::bif::resourceTypeLabel(resource.type, archive_.gameProfile()),
+             neoshared::bif::hexResourceId(resource.resourceId), resource.status, bif.storedPath});
     }
 
-    bool looseResourceMatches(const neobif::LooseResourceInfo& resource,
-                              const neobif::LooseArchiveInfo& archive,
-                              const neobif::ResourceQuery& query) const {
+    bool looseResourceMatches(const neoshared::bif::LooseResourceInfo& resource,
+                              const neoshared::bif::LooseArchiveInfo& archive,
+                              const neoshared::bif::ResourceQuery& query) const {
         return query.matches(resource.fileName(), resource.extension,
-            {resource.resref, neobif::resourceTypeLabel(resource.type, archive_.gameProfile()),
-             neobif::hexResourceId(resource.resourceId), resource.status,
+            {resource.resref, neoshared::bif::resourceTypeLabel(resource.type, archive_.gameProfile()),
+             neoshared::bif::hexResourceId(resource.resourceId), resource.status,
              neoshared::genericPathToUtf8(archive.relativePath),
-             neobif::looseArchiveKindName(archive.kind)});
+             neoshared::bif::looseArchiveKindName(archive.kind)});
     }
 
     void updateSearchCount() {
@@ -1621,7 +1609,7 @@ private:
             }
         } else {
             for(auto index:indices) {
-                if(data->source==ResourceSource::KeyBif)appendBifResourceNode(item,index);
+                if(data->source==neoshared::bif::ResourceSource::KeyBif)appendBifResourceNode(item,index);
                 else appendLooseResourceNode(item,index);
             }
         }
@@ -1634,7 +1622,7 @@ private:
             const auto key=nodeKey(*data);
             bool reveal=expandedNodes_.count(key)!=0;
             if(data->lazyResources) for(auto index:*data->lazyResources) {
-                const auto type=data->source==ResourceSource::KeyBif?archive_.resources()[index].type:looseArchives_.resources()[index].type;
+                const auto type=data->source==neoshared::bif::ResourceSource::KeyBif?archive_.resources()[index].type:looseArchives_.resources()[index].type;
                 const NodeData resource(NodeKind::Resource,data->ownerIndex,index,type,data->source);
                 if(selectedNodes_.count(nodeKey(resource))){reveal=true;break;}
             }
@@ -1645,13 +1633,13 @@ private:
         for(auto child=tree_->GetFirstChild(item,cookie);child.IsOk();child=tree_->GetNextChild(item,cookie))restoreTreeState(child);
     }
 
-    void addResourceGroups(const wxTreeItemId& parent,ResourceSource source,std::size_t owner,
+    void addResourceGroups(const wxTreeItemId& parent,neoshared::bif::ResourceSource source,std::size_t owner,
                            const std::vector<std::size_t>& visible) {
         if(!groupByType_) {attachResourceList(parent,visible);return;}
         std::map<std::uint16_t,std::vector<std::size_t>> groups;
-        for(auto index:visible)groups[source==ResourceSource::KeyBif?archive_.resources()[index].type:looseArchives_.resources()[index].type].push_back(index);
+        for(auto index:visible)groups[source==neoshared::bif::ResourceSource::KeyBif?archive_.resources()[index].type:looseArchives_.resources()[index].type].push_back(index);
         for(const auto& [type,indices]:groups) {
-            const auto node=tree_->AppendItem(parent,wxui::toWx("."+neobif::resourceTypeExtension(type, archive_.gameProfile())+" ("+std::to_string(indices.size())+")"), -1,-1,
+            const auto node=tree_->AppendItem(parent,wxui::toWx("."+neoshared::bif::resourceTypeExtension(type, archive_.gameProfile())+" ("+std::to_string(indices.size())+")"), -1,-1,
                 new NodeData(NodeKind::Type,owner,kNoIndex,type,source));
             attachResourceList(node,indices);
         }
@@ -1678,7 +1666,7 @@ private:
         visibleBif_.assign(archive_.resources().size(),false);
         visibleLoose_.assign(looseArchives_.resources().size(),false);
         if(!archive_.isOpen()) {tree_->Thaw();rebuilding_=false;updateSearchCount();return;}
-        const neobif::ResourceQuery query(wxui::toStd(filter_->GetValue()));
+        const neoshared::bif::ResourceQuery query(wxui::toStd(filter_->GetValue()));
         const auto root=tree_->AddRoot(neosettings::pathToWx(keyPath_.filename()),-1,-1,new NodeData(NodeKind::Root));
         for(const auto& bif:archive_.bifs()) {
             std::vector<std::size_t> visible;
@@ -1692,36 +1680,36 @@ private:
                 (query.empty()?" resources)":" matches)")+
                 (!bif.available?" [missing]":(!bif.valid?" [invalid]":""));
             const auto node=tree_->AppendItem(root,wxui::toWx(label),-1,-1,new NodeData(NodeKind::Bif,bif.index));
-            addResourceGroups(node,ResourceSource::KeyBif,bif.index,visible);
+            addResourceGroups(node,neoshared::bif::ResourceSource::KeyBif,bif.index,visible);
         }
         wxTreeItemId looseRoot;
         std::map<std::string,wxTreeItemId> directories;
         for(const auto& archive:looseArchives_.archives()) {
             std::vector<std::size_t> visible;
             const bool ownerMatches=query.empty()||query.matchesContext(neoshared::genericPathToUtf8(archive.relativePath))||
-                query.matchesContext(neobif::looseArchiveKindName(archive.kind))||
+                query.matchesContext(neoshared::bif::looseArchiveKindName(archive.kind))||
                 std::any_of(archive.messages.begin(),archive.messages.end(),[&](const std::string& message){return query.matchesContext(message);});
             for(auto index:archive.resourceIndices)if(index<looseArchives_.resources().size()&&(ownerMatches||looseResourceMatches(looseArchives_.resources()[index],archive,query))) {
                 visible.push_back(index);visibleLoose_[index]=true;
             }
             if(visible.empty()&&!ownerMatches)continue;
             if(!looseRoot.IsOk())looseRoot=tree_->AppendItem(root,"Game Archives",-1,-1,
-                new NodeData(NodeKind::LooseRoot,kNoIndex,kNoIndex,0,ResourceSource::LooseArchive));
+                new NodeData(NodeKind::LooseRoot,kNoIndex,kNoIndex,0,neoshared::bif::ResourceSource::LooseArchive));
             auto parent=looseRoot;std::filesystem::path accumulated;
             for(const auto& component:archive.relativePath.parent_path()) {
                 const auto part=neoshared::genericPathToUtf8(component);if(part.empty()||part=="."||part=="..")continue;
                 accumulated/=component;const auto pathKey=lowerAscii(neoshared::genericPathToUtf8(accumulated));
                 auto found=directories.find(pathKey);
                 if(found==directories.end()) {
-                    parent=tree_->AppendItem(parent,wxui::toWx(part),-1,-1,new NodeData(NodeKind::Directory,kNoIndex,kNoIndex,0,ResourceSource::LooseArchive,neoshared::genericPathToUtf8(accumulated)));
+                    parent=tree_->AppendItem(parent,wxui::toWx(part),-1,-1,new NodeData(NodeKind::Directory,kNoIndex,kNoIndex,0,neoshared::bif::ResourceSource::LooseArchive,neoshared::genericPathToUtf8(accumulated)));
                     directories.emplace(pathKey,parent);
                 }else parent=found->second;
             }
             const auto label=neoshared::pathToUtf8(archive.relativePath.filename())+" ("+
                 std::to_string(visible.size())+(query.empty()?" resources)":" matches)")+
                 (!archive.valid?" [invalid]":"");
-            const auto node=tree_->AppendItem(parent,wxui::toWx(label),-1,-1,new NodeData(NodeKind::LooseArchive,archive.index,kNoIndex,0,ResourceSource::LooseArchive));
-            addResourceGroups(node,ResourceSource::LooseArchive,archive.index,visible);
+            const auto node=tree_->AppendItem(parent,wxui::toWx(label),-1,-1,new NodeData(NodeKind::LooseArchive,archive.index,kNoIndex,0,neoshared::bif::ResourceSource::LooseArchive));
+            addResourceGroups(node,neoshared::bif::ResourceSource::LooseArchive,archive.index,visible);
         }
         restoreTreeState(root);tree_->Expand(root);
         if (!query.empty()) {
@@ -1736,25 +1724,25 @@ private:
     void appendBifResourceNode(const wxTreeItemId& parent, std::size_t resourceIndex) {
         const auto& resource = archive_.resources()[resourceIndex];
         std::ostringstream label;
-        label << resource.fileName() << " - " << neobif::formatByteSize(resource.size);
+        label << resource.fileName() << " - " << neoshared::bif::formatByteSize(resource.size);
         if (!resource.extractable) label << " [unavailable]";
         if (!resource.keyed) label << " [not indexed]";
         tree_->AppendItem(parent, wxui::toWx(label.str()), -1, -1,
                           new NodeData(NodeKind::Resource, resource.bifIndex,
                                        resourceIndex, resource.type,
-                                       ResourceSource::KeyBif));
+                                       neoshared::bif::ResourceSource::KeyBif));
     }
 
     void appendLooseResourceNode(const wxTreeItemId& parent,
                                  std::size_t resourceIndex) {
         const auto& resource = looseArchives_.resources()[resourceIndex];
         std::ostringstream label;
-        label << resource.fileName() << " - " << neobif::formatByteSize(resource.size);
+        label << resource.fileName() << " - " << neoshared::bif::formatByteSize(resource.size);
         if (!resource.extractable) label << " [unavailable]";
         tree_->AppendItem(parent, wxui::toWx(label.str()), -1, -1,
                           new NodeData(NodeKind::Resource, resource.archiveIndex,
                                        resourceIndex, resource.type,
-                                       ResourceSource::LooseArchive));
+                                       neoshared::bif::ResourceSource::LooseArchive));
     }
 
     NodeData* selectedNodeData() const {
@@ -1787,19 +1775,19 @@ private:
                 parent[directory.size()] == '/');
     }
 
-    std::vector<ResourceSelection> nodeResources(const NodeData* data) const {
+    std::vector<neoshared::bif::ResourceSelection> nodeResources(const NodeData* data) const {
         if (data == nullptr || !archive_.isOpen()) return {};
-        std::vector<ResourceSelection> selected;
+        std::vector<neoshared::bif::ResourceSelection> selected;
         const auto appendAllBif = [&] {
             selected.reserve(selected.size() + archive_.resources().size());
             for (const auto& resource : archive_.resources()) {
-                selected.push_back({ResourceSource::KeyBif, resource.index});
+                selected.push_back({neoshared::bif::ResourceSource::KeyBif, resource.index});
             }
         };
         const auto appendAllLoose = [&] {
             selected.reserve(selected.size() + looseArchives_.resources().size());
             for (const auto& resource : looseArchives_.resources()) {
-                selected.push_back({ResourceSource::LooseArchive, resource.index});
+                selected.push_back({neoshared::bif::ResourceSource::LooseArchive, resource.index});
             }
         };
 
@@ -1811,7 +1799,7 @@ private:
         case NodeKind::Bif:
             if (data->ownerIndex < archive_.bifs().size()) {
                 for (const std::size_t index : archive_.bifs()[data->ownerIndex].resourceIndices) {
-                    selected.push_back({ResourceSource::KeyBif, index});
+                    selected.push_back({neoshared::bif::ResourceSource::KeyBif, index});
                 }
             }
             break;
@@ -1825,7 +1813,7 @@ private:
                     continue;
                 }
                 for (const std::size_t index : looseArchive.resourceIndices) {
-                    selected.push_back({ResourceSource::LooseArchive, index});
+                    selected.push_back({neoshared::bif::ResourceSource::LooseArchive, index});
                 }
             }
             break;
@@ -1833,26 +1821,26 @@ private:
             if (data->ownerIndex < looseArchives_.archives().size()) {
                 for (const std::size_t index :
                      looseArchives_.archives()[data->ownerIndex].resourceIndices) {
-                    selected.push_back({ResourceSource::LooseArchive, index});
+                    selected.push_back({neoshared::bif::ResourceSource::LooseArchive, index});
                 }
             }
             break;
         case NodeKind::Type:
-            if (data->source == ResourceSource::KeyBif &&
+            if (data->source == neoshared::bif::ResourceSource::KeyBif &&
                 data->ownerIndex < archive_.bifs().size()) {
                 for (const std::size_t index : archive_.bifs()[data->ownerIndex].resourceIndices) {
                     if (index < archive_.resources().size() &&
                         archive_.resources()[index].type == data->type) {
-                        selected.push_back({ResourceSource::KeyBif, index});
+                        selected.push_back({neoshared::bif::ResourceSource::KeyBif, index});
                     }
                 }
-            } else if (data->source == ResourceSource::LooseArchive &&
+            } else if (data->source == neoshared::bif::ResourceSource::LooseArchive &&
                        data->ownerIndex < looseArchives_.archives().size()) {
                 for (const std::size_t index :
                      looseArchives_.archives()[data->ownerIndex].resourceIndices) {
                     if (index < looseArchives_.resources().size() &&
                         looseArchives_.resources()[index].type == data->type) {
-                        selected.push_back({ResourceSource::LooseArchive, index});
+                        selected.push_back({neoshared::bif::ResourceSource::LooseArchive, index});
                     }
                 }
             }
@@ -1867,13 +1855,13 @@ private:
         return selected;
     }
 
-    std::vector<ResourceSelection> selectedResources(bool respectFilter=true) const {
+    std::vector<neoshared::bif::ResourceSelection> selectedResources(bool respectFilter=true) const {
         wxArrayTreeItemIds selectedItems;tree_->GetSelections(selectedItems);
-        std::vector<ResourceSelection> result;std::set<std::pair<int,std::size_t>> used;
+        std::vector<neoshared::bif::ResourceSelection> result;std::set<std::pair<int,std::size_t>> used;
         for(const auto& item:selectedItems) {
             const auto* data=dynamic_cast<NodeData*>(tree_->GetItemData(item));
             for(const auto& resource:nodeResources(data)) {
-                const auto& visible=resource.source==ResourceSource::KeyBif?visibleBif_:visibleLoose_;
+                const auto& visible=resource.source==neoshared::bif::ResourceSource::KeyBif?visibleBif_:visibleLoose_;
                 if(respectFilter && (resource.resourceIndex>=visible.size()||!visible[resource.resourceIndex]))continue;
                 if(used.emplace(static_cast<int>(resource.source),resource.resourceIndex).second)result.push_back(resource);
             }
@@ -1881,20 +1869,20 @@ private:
         return result;
     }
 
-    std::vector<ResourceSelection> allResourceSelections() const {
-        std::vector<ResourceSelection> selected;
+    std::vector<neoshared::bif::ResourceSelection> allResourceSelections() const {
+        std::vector<neoshared::bif::ResourceSelection> selected;
         selected.reserve(archive_.resources().size() + looseArchives_.resources().size());
         for (const auto& resource : archive_.resources()) {
-            selected.push_back({ResourceSource::KeyBif, resource.index});
+            selected.push_back({neoshared::bif::ResourceSource::KeyBif, resource.index});
         }
         for (const auto& resource : looseArchives_.resources()) {
-            selected.push_back({ResourceSource::LooseArchive, resource.index});
+            selected.push_back({neoshared::bif::ResourceSource::LooseArchive, resource.index});
         }
         return selected;
     }
 
-    bool resourceIsExtractable(const ResourceSelection& selection) const {
-        if (selection.source == ResourceSource::KeyBif) {
+    bool resourceIsExtractable(const neoshared::bif::ResourceSelection& selection) const {
+        if (selection.source == neoshared::bif::ResourceSource::KeyBif) {
             return selection.resourceIndex < archive_.resources().size() &&
                    archive_.resources()[selection.resourceIndex].extractable;
         }
@@ -1902,8 +1890,8 @@ private:
                looseArchives_.resources()[selection.resourceIndex].extractable;
     }
 
-    std::string resourceFileName(const ResourceSelection& selection) const {
-        if (selection.source == ResourceSource::KeyBif) {
+    std::string resourceFileName(const neoshared::bif::ResourceSelection& selection) const {
+        if (selection.source == neoshared::bif::ResourceSource::KeyBif) {
             return selection.resourceIndex < archive_.resources().size()
                 ? archive_.resources()[selection.resourceIndex].fileName()
                 : std::string{};
@@ -1913,8 +1901,8 @@ private:
             : std::string{};
     }
 
-    std::string resourceDisplayName(const ResourceSelection& selection) const {
-        if (selection.source == ResourceSource::KeyBif) {
+    std::string resourceDisplayName(const neoshared::bif::ResourceSelection& selection) const {
+        if (selection.source == neoshared::bif::ResourceSource::KeyBif) {
             if (selection.resourceIndex >= archive_.resources().size()) return "Invalid BIF resource";
             const auto& resource = archive_.resources()[selection.resourceIndex];
             const std::string archivePath = resource.bifIndex < archive_.bifs().size()
@@ -1932,8 +1920,8 @@ private:
         return archivePath + "/" + resource.fileName();
     }
 
-    std::uint64_t resourceSize(const ResourceSelection& selection) const {
-        if (selection.source == ResourceSource::KeyBif) {
+    std::uint64_t resourceSize(const neoshared::bif::ResourceSelection& selection) const {
+        if (selection.source == neoshared::bif::ResourceSource::KeyBif) {
             return selection.resourceIndex < archive_.resources().size()
                 ? archive_.resources()[selection.resourceIndex].size : 0u;
         }
@@ -1941,44 +1929,44 @@ private:
             ? looseArchives_.resources()[selection.resourceIndex].size : 0u;
     }
 
-    std::string resourceIdentity(const ResourceSelection& selection) const {
+    std::string resourceIdentity(const neoshared::bif::ResourceSelection& selection) const {
         std::ostringstream identity;
-        if (selection.source == ResourceSource::KeyBif &&
+        if (selection.source == neoshared::bif::ResourceSource::KeyBif &&
             selection.resourceIndex < archive_.resources().size()) {
-            identity << "bif_" << neobif::hexResourceId(
+            identity << "bif_" << neoshared::bif::hexResourceId(
                 archive_.resources()[selection.resourceIndex].resourceId).substr(2);
-        } else if (selection.source == ResourceSource::LooseArchive &&
+        } else if (selection.source == neoshared::bif::ResourceSource::LooseArchive &&
                    selection.resourceIndex < looseArchives_.resources().size()) {
             const auto& resource = looseArchives_.resources()[selection.resourceIndex];
             identity << "arc_" << resource.archiveIndex << '_'
-                     << neobif::hexResourceId(resource.resourceId).substr(2);
+                     << neoshared::bif::hexResourceId(resource.resourceId).substr(2);
         } else {
             identity << "resource_" << selection.resourceIndex;
         }
         return identity.str();
     }
 
-    bool readResourceSelection(const ResourceSelection& selection,
+    bool readResourceSelection(const neoshared::bif::ResourceSelection& selection,
                                std::vector<std::uint8_t>& bytes,
                                std::string& error) const {
-        if (selection.source == ResourceSource::KeyBif) {
+        if (selection.source == neoshared::bif::ResourceSource::KeyBif) {
             return archive_.readResource(selection.resourceIndex, bytes, error);
         }
         return looseArchives_.readResource(selection.resourceIndex, bytes, error);
     }
 
     std::filesystem::path resourceOutputPath(
-        const ResourceSelection& selection,
+        const neoshared::bif::ResourceSelection& selection,
         neobif::ExtractionLayout layout) const {
-        if (selection.source == ResourceSource::KeyBif) {
-            const auto paths = archive_.outputPaths({selection.resourceIndex}, layout);
+        if (selection.source == neoshared::bif::ResourceSource::KeyBif) {
+            const auto paths = neobif::archiveOutputPaths(archive_, {selection.resourceIndex}, layout);
             return paths.empty() ? std::filesystem::path{} : paths.front();
         }
-        return looseArchives_.outputPath(selection.resourceIndex, layout);
+        return neobif::archiveOutputPath(looseArchives_, selection.resourceIndex, layout);
     }
 
     std::vector<std::filesystem::path> resourceOutputPaths(
-        const std::vector<ResourceSelection>& selections,
+        const std::vector<neoshared::bif::ResourceSelection>& selections,
         neobif::ExtractionLayout layout) const {
         std::vector<std::filesystem::path> desired;
         desired.reserve(selections.size());
@@ -1989,12 +1977,12 @@ private:
     }
 
 #if defined(__EMSCRIPTEN__)
-    bool browserRangeForSelection(const ResourceSelection& selection,
+    bool browserRangeForSelection(const neoshared::bif::ResourceSelection& selection,
                                   std::uint32_t& sessionId,
                                   std::uint32_t& fileId,
                                   std::uint64_t& offset,
                                   std::uint64_t& size) const {
-        if (selection.source == ResourceSource::KeyBif) {
+        if (selection.source == neoshared::bif::ResourceSource::KeyBif) {
             if (selection.resourceIndex >= archive_.resources().size()) return false;
             const auto& resource = archive_.resources()[selection.resourceIndex];
             if (resource.bifIndex >= archive_.bifs().size()) return false;
@@ -2020,7 +2008,7 @@ private:
     }
 #endif
 
-    std::string selectionBaseName(const std::vector<ResourceSelection>& selections) const {
+    std::string selectionBaseName(const std::vector<neoshared::bif::ResourceSelection>& selections) const {
         wxArrayTreeItemIds selectedItems;
         tree_->GetSelections(selectedItems);
         if (selectedItems.size() > 1u) return "selected_resources";
@@ -2056,10 +2044,10 @@ private:
             }
             if (data->kind == NodeKind::LooseRoot) return "game_archives";
             if (data->kind == NodeKind::Type) {
-                return neobif::resourceTypeExtension(data->type, archive_.gameProfile()) + "_resources";
+                return neoshared::bif::resourceTypeExtension(data->type, archive_.gameProfile()) + "_resources";
             }
             if (data->kind == NodeKind::Page) {
-                return neobif::resourceTypeExtension(data->type, archive_.gameProfile()) + "_resource_page";
+                return neoshared::bif::resourceTypeExtension(data->type, archive_.gameProfile()) + "_resource_page";
             }
         }
         const std::size_t total = archive_.resources().size() + looseArchives_.resources().size();
@@ -2086,7 +2074,7 @@ private:
 
     void exportByFileType() {
         if (jobRunning_ || !archive_.isOpen()) return;
-        const auto types = neobif::summarizeResourceTypes(archive_, looseArchives_);
+        const auto types = neoshared::bif::summarizeResourceTypes(archive_, looseArchives_);
         if (types.empty()) {
             wxMessageBox("The open game session has no indexed resource types.",
                          "Nothing to Export", wxOK | wxICON_INFORMATION, this);
@@ -2094,7 +2082,7 @@ private:
         }
         wxArrayString labels;
         int initial = 0;
-        const neobif::ResourceQuery query(wxui::toStd(filter_->GetValue()));
+        const neoshared::bif::ResourceQuery query(wxui::toStd(filter_->GetValue()));
         bool pickedAvailable = false;
         for (std::size_t i = 0; i < types.size(); ++i) {
             const auto& entry = types[i];
@@ -2131,7 +2119,7 @@ private:
         const int chosen = dialog.GetSelection();
         if (chosen == wxNOT_FOUND || static_cast<std::size_t>(chosen) >= types.size()) return;
         const auto& type = types[static_cast<std::size_t>(chosen)];
-        const auto resources = neobif::selectResourceType(archive_, looseArchives_, type.type);
+        const auto resources = neoshared::bif::selectResourceType(archive_, looseArchives_, type.type);
         // Route through the existing native/browser ZIP export, including
         // unavailable-resource confirmation, collision and source protection,
         // staging, cancellation and size limits. Even one match is a ZIP.
@@ -2139,12 +2127,12 @@ private:
     }
 
     std::vector<neobif::ExportItem> makeNativeExportItems(
-        const std::vector<ResourceSelection>& selections,
+        const std::vector<neoshared::bif::ResourceSelection>& selections,
         const std::vector<std::filesystem::path>& paths) {
         std::vector<neobif::ExportItem> items;
         items.reserve(selections.size());
         for (std::size_t index = 0; index < selections.size(); ++index) {
-            const ResourceSelection selection = selections[index];
+            const neoshared::bif::ResourceSelection selection = selections[index];
             neobif::ExportItem item;
             item.relativePath = paths[index];
             item.displayName = resourceDisplayName(selection);
@@ -2153,8 +2141,8 @@ private:
             const auto source=sourceArchivePath(selection);
             if(!source.empty())item.sourcePaths.push_back(source);
             item.sourcePaths.push_back(keyPath_);
-            item.stream=[this,selection](const neobif::ByteSink& sink,std::string& error,const neobif::JobControl& job) {
-                return selection.source==ResourceSource::KeyBif
+            item.stream=[this,selection](const neoshared::bif::ByteSink& sink,std::string& error,const neoshared::bif::JobControl& job) {
+                return selection.source==neoshared::bif::ResourceSource::KeyBif
                     ? archive_.streamResource(selection.resourceIndex,sink,error,job)
                     : looseArchives_.streamResource(selection.resourceIndex,sink,error,job);
             };
@@ -2167,11 +2155,11 @@ private:
         return items;
     }
 
-    void extractSelections(const std::vector<ResourceSelection>& selections,
+    void extractSelections(const std::vector<neoshared::bif::ResourceSelection>& selections,
                            std::string baseName,
                            bool forceZip) {
         if(jobRunning_)return;
-        std::vector<ResourceSelection> extractable;
+        std::vector<neoshared::bif::ResourceSelection> extractable;
         extractable.reserve(selections.size());
         for (const auto& selection : selections) {
             if (resourceIsExtractable(selection)) extractable.push_back(selection);
@@ -2338,7 +2326,7 @@ private:
             if(!selected)return;
             items[0].relativePath=selected->filename();options.existing=neobif::ExistingPolicy::Replace;
             neobif::ExtractionReport report;
-            if(!runJob("Extracting resource",[&](const neobif::JobControl& job){options.job=job;report=neobif::extractExportItems(items,selected->parent_path(),options);}))return;
+            if(!runJob("Extracting resource",[&](const neoshared::bif::JobControl& job){options.job=job;report=neobif::extractExportItems(items,selected->parent_path(),options);}))return;
             showExtractionResult(report);return;
         }
         if(forceZip) {
@@ -2355,12 +2343,12 @@ private:
             std::uint64_t inputBytes = 0u;
             for (const auto& item : items) inputBytes += item.expectedSize;
             const std::string confirmation = "Save " + resourceCountText(items.size()) +
-                " (" + neobif::formatByteSize(inputBytes) + ") to:\n\n" +
+                " (" + neoshared::bif::formatByteSize(inputBytes) + ") to:\n\n" +
                 neoshared::pathToUtf8(output);
             if(wxMessageBox(wxui::toWx(confirmation), "Confirm ZIP",
                             wxOK|wxCANCEL|wxICON_QUESTION,this)!=wxOK)return;
             options.existing=neobif::ExistingPolicy::Replace;std::string error;bool written=false;
-            if(!runJob("Writing ZIP",[&](const neobif::JobControl& job){options.job=job;written=neobif::writeExportZip(items,output,error,options);}))return;
+            if(!runJob("Writing ZIP",[&](const neoshared::bif::JobControl& job){options.job=job;written=neobif::writeExportZip(items,output,error,options);}))return;
             if(!written) {
                 if (error.empty()) error = "NeoBIF could not commit the ZIP archive.";
                 wxMessageBox(wxui::toWx(error),"ZIP Was Not Saved",wxOK|wxICON_WARNING,this);
@@ -2385,7 +2373,7 @@ private:
         options.existing=policy.GetSelection()==1?neobif::ExistingPolicy::Replace:
             (policy.GetSelection()==2?neobif::ExistingPolicy::KeepBoth:neobif::ExistingPolicy::Skip);
         neobif::ExportPlan plan;
-        if(!runJob("Checking output names",[&](const neobif::JobControl& job){options.job=job;plan=neobif::planExportItems(items,output,options);}))return;
+        if(!runJob("Checking output names",[&](const neoshared::bif::JobControl& job){options.job=job;plan=neobif::planExportItems(items,output,options);}))return;
         std::ostringstream summary;
         summary << countText(plan.writes, "file", "files") << " to write\n"
                 << countText(plan.skipped, "existing file", "existing files") << " to skip\n"
@@ -2410,7 +2398,7 @@ private:
                 << (plan.writes == 1u ? "this file?" : "these files?");
         if(wxMessageBox(wxui::toWx(summary.str()),"Confirm extraction scope",wxOK|wxCANCEL|wxICON_QUESTION,this)!=wxOK)return;
         neobif::ExtractionReport report;
-        if(!runJob("Extracting resources",[&](const neobif::JobControl& job){
+        if(!runJob("Extracting resources",[&](const neoshared::bif::JobControl& job){
             options.job=job;
             report=neobif::extractPlannedExportItems(items,plan,output,options);
         }))return;
@@ -2428,8 +2416,8 @@ private:
         return value.empty() ? "neobif_resources" : value;
     }
 
-    std::filesystem::path sourceArchivePath(const ResourceSelection& selection) const {
-        if(selection.source==ResourceSource::KeyBif) {
+    std::filesystem::path sourceArchivePath(const neoshared::bif::ResourceSelection& selection) const {
+        if(selection.source==neoshared::bif::ResourceSource::KeyBif) {
             if(selection.resourceIndex>=archive_.resources().size())return {};
             const auto owner=archive_.resources()[selection.resourceIndex].bifIndex;
             if(owner>=archive_.bifs().size())return {};
@@ -2448,11 +2436,11 @@ private:
     std::filesystem::path sourceArchivePath(const NodeData& node) const {
         if (node.kind == NodeKind::Resource) {
             return sourceArchivePath(
-                ResourceSelection{node.source, node.resourceIndex});
+                neoshared::bif::ResourceSelection{node.source, node.resourceIndex});
         }
         if ((node.kind == NodeKind::Bif || node.kind == NodeKind::Type ||
              node.kind == NodeKind::Page) &&
-            node.source == ResourceSource::KeyBif &&
+            node.source == neoshared::bif::ResourceSource::KeyBif &&
             node.ownerIndex < archive_.bifs().size()) {
             const auto& bif = archive_.bifs()[node.ownerIndex];
             return bif.browserBacked ? std::filesystem::path(bif.browserRelativePath)
@@ -2460,7 +2448,7 @@ private:
         }
         if ((node.kind == NodeKind::LooseArchive || node.kind == NodeKind::Type ||
              node.kind == NodeKind::Page) &&
-            node.source == ResourceSource::LooseArchive &&
+            node.source == neoshared::bif::ResourceSource::LooseArchive &&
             node.ownerIndex < looseArchives_.archives().size()) {
             const auto& archive = looseArchives_.archives()[node.ownerIndex];
             return archive.browserBacked
@@ -2506,7 +2494,7 @@ private:
             }
         } else {
             for (const auto& selected : selectedResources()) {
-                const auto value = selected.source == ResourceSource::KeyBif
+                const auto value = selected.source == neoshared::bif::ResourceSource::KeyBif
                     ? archive_.resources()[selected.resourceIndex].resref
                     : looseArchives_.resources()[selected.resourceIndex].resref;
                 if (value.empty() || !seen.insert(value).second) continue;
@@ -2624,7 +2612,7 @@ private:
         tree_->GetSelections(selectedItems);
         std::ostringstream text;
 
-        const auto writeSelectionSummary = [&](const std::vector<ResourceSelection>& selections) {
+        const auto writeSelectionSummary = [&](const std::vector<neoshared::bif::ResourceSelection>& selections) {
             std::size_t extractable = 0u;
             std::uint64_t bytes = 0u;
             for (const auto& selection : selections) {
@@ -2636,7 +2624,7 @@ private:
             text << (filteredScope ? "Resources in Search scope: " : "Resources: ")
                  << selections.size() << '\n'
                  << "Extractable: " << extractable << '\n'
-                 << "Extractable size: " << neobif::formatByteSize(bytes) << '\n';
+                 << "Extractable size: " << neoshared::bif::formatByteSize(bytes) << '\n';
         };
 
         if (selectedItems.size() > 1u) {
@@ -2672,7 +2660,7 @@ private:
                  << "Game archives: " << looseArchives_.archives().size() << '\n'
                  << "Resources: " << totalResources << '\n'
                  << "Extractable: " << totalExtractable << '\n'
-                 << "Extractable size: " << neobif::formatByteSize(extractableBytes) << '\n';
+                 << "Extractable size: " << neoshared::bif::formatByteSize(extractableBytes) << '\n';
             if (!filter_->GetValue().empty()) {
                 text << "Search matches: " << visibleCount << '\n';
             }
@@ -2691,7 +2679,7 @@ private:
                     std::min<std::size_t>(archive_.issues().size(), 100u);
                 for (std::size_t i = 0; i < limit; ++i) {
                     const auto& issue = archive_.issues()[i];
-                    text << (issue.severity == neobif::IssueSeverity::Error
+                    text << (issue.severity == neoshared::bif::IssueSeverity::Error
                                  ? "Error: " : "Warning: ")
                          << issue.message;
                     if (issue.bifIndex) text << " (BIF " << *issue.bifIndex << ')';
@@ -2730,7 +2718,7 @@ private:
                    data->ownerIndex < archive_.bifs().size()) {
             const auto& bif = archive_.bifs()[data->ownerIndex];
             text << "Stored Path: " << bif.storedPath << '\n'
-                 << "Size: " << neobif::formatByteSize(bif.actualFileSize) << '\n'
+                 << "Size: " << neoshared::bif::formatByteSize(bif.actualFileSize) << '\n'
                  << "Resources: " << bif.resourceIndices.size() << '\n';
         } else if (data->kind == NodeKind::LooseRoot) {
             text << "Game Archives\n"
@@ -2773,8 +2761,8 @@ private:
             text << "Archive\n"
                  << "=======\n\n"
                  << "Path: " << neoshared::genericPathToUtf8(looseArchive.relativePath) << '\n'
-                 << "Type: " << neobif::looseArchiveKindName(looseArchive.kind) << '\n'
-                 << "Size: " << neobif::formatByteSize(looseArchive.actualFileSize) << '\n'
+                 << "Type: " << neoshared::bif::looseArchiveKindName(looseArchive.kind) << '\n'
+                 << "Size: " << neoshared::bif::formatByteSize(looseArchive.actualFileSize) << '\n'
                  << "Resources: " << looseArchive.resourceIndices.size() << '\n';
             if (!looseArchive.valid || !looseArchive.messages.empty()) {
                 text << "\nIssues\n"
@@ -2795,11 +2783,11 @@ private:
         } else if (data->kind == NodeKind::Type || data->kind == NodeKind::Page) {
             text << (data->kind == NodeKind::Page ? "Resource Page\n=============\n\n"
                                                   : "File Type\n=========\n\n")
-                 << "Type: ." << neobif::resourceTypeExtension(data->type, archive_.gameProfile()) << '\n';
-            if (data->source == ResourceSource::KeyBif &&
+                 << "Type: ." << neoshared::bif::resourceTypeExtension(data->type, archive_.gameProfile()) << '\n';
+            if (data->source == neoshared::bif::ResourceSource::KeyBif &&
                 data->ownerIndex < archive_.bifs().size()) {
                 text << "Source: " << archive_.bifs()[data->ownerIndex].storedPath << '\n';
-            } else if (data->source == ResourceSource::LooseArchive &&
+            } else if (data->source == neoshared::bif::ResourceSource::LooseArchive &&
                        data->ownerIndex < looseArchives_.archives().size()) {
                 text << "Source: "
                      << neoshared::genericPathToUtf8(
@@ -2809,25 +2797,25 @@ private:
         } else if (data->kind == NodeKind::Resource) {
             text << "Resource\n"
                  << "========\n\n";
-            if (data->source == ResourceSource::KeyBif &&
+            if (data->source == neoshared::bif::ResourceSource::KeyBif &&
                 data->resourceIndex < archive_.resources().size()) {
                 const auto& resource = archive_.resources()[data->resourceIndex];
                 text << "Filename: " << resource.fileName() << '\n'
                      << "ResRef: " << resource.resref << '\n'
                      << "Type: ." << resource.extension << '\n'
-                     << "Size: " << neobif::formatByteSize(resource.size) << '\n';
+                     << "Size: " << neoshared::bif::formatByteSize(resource.size) << '\n';
                 if (resource.bifIndex < archive_.bifs().size()) {
                     text << "Source: " << archive_.bifs()[resource.bifIndex].storedPath
                          << '\n';
                 }
                 text << "Status: " << resource.status << '\n';
-            } else if (data->source == ResourceSource::LooseArchive &&
+            } else if (data->source == neoshared::bif::ResourceSource::LooseArchive &&
                        data->resourceIndex < looseArchives_.resources().size()) {
                 const auto& resource = looseArchives_.resources()[data->resourceIndex];
                 text << "Filename: " << resource.fileName() << '\n'
                      << "ResRef: " << resource.resref << '\n'
                      << "Type: ." << resource.extension << '\n'
-                     << "Size: " << neobif::formatByteSize(resource.size) << '\n';
+                     << "Size: " << neoshared::bif::formatByteSize(resource.size) << '\n';
                 if (resource.archiveIndex < looseArchives_.archives().size()) {
                     text << "Source: "
                          << neoshared::genericPathToUtf8(
@@ -2874,18 +2862,18 @@ private:
         if(rebuilding_)return;
         const bool open = archive_.isOpen();
         const auto selections = open ? selectedResources()
-                                     : std::vector<ResourceSelection>{};
+                                     : std::vector<neoshared::bif::ResourceSelection>{};
         const auto entireSelections = open ? selectedResources(false)
-                                           : std::vector<ResourceSelection>{};
+                                           : std::vector<neoshared::bif::ResourceSelection>{};
         const std::size_t extractableSelectionCount = static_cast<std::size_t>(std::count_if(
             selections.begin(), selections.end(),
-            [this](const ResourceSelection& selection) {
+            [this](const neoshared::bif::ResourceSelection& selection) {
                 return resourceIsExtractable(selection);
             }));
         const bool selectionExtractable = extractableSelectionCount != 0u;
         const bool entireSelectionExtractable = std::any_of(
             entireSelections.begin(), entireSelections.end(),
-            [this](const ResourceSelection& selection) {
+            [this](const neoshared::bif::ResourceSelection& selection) {
                 return resourceIsExtractable(selection);
             });
         const bool filterActive = !filter_->GetValue().empty();
