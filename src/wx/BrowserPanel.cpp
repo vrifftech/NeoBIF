@@ -58,9 +58,9 @@ namespace {
 
 #if !defined(__EMSCRIPTEN__)
 constexpr const char* kArchiveWildcard =
-    "Odyssey archive files (*.key;*.bif)|*.key;*.bif|KEY files (*.key)|*.key|BIF files (*.bif)|*.bif|All files (*.*)|*.*";
+    "Odyssey archive files (*.key;*.bif;*.bzf)|*.key;*.bif;*.bzf|KEY files (*.key)|*.key|BIF files (*.bif;*.bzf)|*.bif;*.bzf|All files (*.*)|*.*";
 constexpr const char* kBifWildcard =
-    "BIF files (*.bif)|*.bif|All files (*.*)|*.*";
+    "BIF files (*.bif;*.bzf)|*.bif;*.bzf|All files (*.*)|*.*";
 constexpr const char* kAllFilesWildcard = "All files (*.*)|*.*";
 constexpr const char* kZipWildcard = "ZIP archives (*.zip)|*.zip|All files (*.*)|*.*";
 #endif
@@ -75,7 +75,8 @@ std::string lowerAscii(std::string value) {
 }
 
 bool hasExtension(const std::filesystem::path& path, const std::string& extension) {
-    return lowerAscii(neoshared::pathToUtf8(path.extension())) == lowerAscii(extension);
+    const auto actual = lowerAscii(neoshared::pathToUtf8(path.extension()));
+    return actual == lowerAscii(extension) || (actual == ".bzf" && extension == ".bif");
 }
 
 using neoshared::bif::ResourceSource;
@@ -849,7 +850,7 @@ private:
         const std::uint64_t request = ++browserSelectionRequest_;
         wxWeakRef<NeoBIFPanelImpl> weak(this);
         neobrowser::requestRetainedFiles(
-            "Open chitin.key and optional relocated BIF files", ".key,.bif", true,
+            "Open chitin.key and optional relocated BIF files", ".key,.bif,.bzf", true,
             [weak, request](neobrowser::RetainedFileSetResult result) mutable {
                 if (!weak) {
                     if (result.sessionId != 0) neobrowser::releaseRetainedFileSet(result.sessionId);
@@ -923,7 +924,7 @@ private:
         const std::uint64_t request = ++browserSelectionRequest_;
         wxWeakRef<NeoBIFPanelImpl> weak(this);
         neobrowser::requestRetainedFiles(
-            "Add or relocate BIF files", ".bif", true,
+            "Add or relocate BIF files", ".bif,.bzf", true,
             [weak, request](neobrowser::RetainedFileSetResult result) mutable {
                 if (!weak) {
                     if (result.sessionId != 0) neobrowser::releaseRetainedFileSet(result.sessionId);
@@ -999,7 +1000,7 @@ private:
         wxWeakRef<NeoBIFPanelImpl> weak(this);
         neobrowser::requestRetainedDirectory(
             "Select a game directory",
-            ".key,.bif,.erf,.mod,.sav,.hak,.nwm,.rim",
+            ".key,.bif,.bzf,.erf,.mod,.mzd,.sav,.hak,.nwm,.rim",
             [weak, request](neobrowser::RetainedFileSetResult result) mutable {
                 if (!weak) {
                     if (result.sessionId != 0) neobrowser::releaseRetainedFileSet(result.sessionId);
@@ -1996,8 +1997,7 @@ private:
         }
         if (selection.resourceIndex >= looseArchives_.resources().size()) return false;
         const auto& resource = looseArchives_.resources()[selection.resourceIndex];
-        if (!resource.directRangeExtractable ||
-            resource.archiveIndex >= looseArchives_.archives().size()) return false;
+        if (resource.archiveIndex >= looseArchives_.archives().size()) return false;
         const auto& looseArchive = looseArchives_.archives()[resource.archiveIndex];
         if (!looseArchive.browserBacked) return false;
         sessionId = looseArchive.browserSessionId;
@@ -2236,7 +2236,18 @@ private:
             }
             entries.push_back(neobrowser::RetainedExportEntry{
                 sessionId, fileId, offset, size,
-                neoshared::genericPathToUtf8(outputPaths[position])});
+                neoshared::genericPathToUtf8(outputPaths[position]), {}});
+            const auto selection = extractable[position];
+            const bool compressed = selection.source == neoshared::bif::ResourceSource::KeyBif
+                ? archive_.bifs()[archive_.resources()[selection.resourceIndex].bifIndex].compressed
+                : !looseArchives_.resources()[selection.resourceIndex].directRangeExtractable;
+            if (compressed) {
+                auto& entry = entries.back();std::string error;
+                if (!readResourceSelection(selection, entry.decodedBytes, error)) {
+                    wxMessageBox(wxui::toWx(error), "Extraction Failed", wxOK | wxICON_ERROR, this);return;
+                }
+                entry.offset = 0;entry.size = entry.decodedBytes.size();
+            }
         }
 
         neobrowser::RetainedExportMode mode = neobrowser::RetainedExportMode::DirectDownload;
