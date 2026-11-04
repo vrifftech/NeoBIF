@@ -2,6 +2,10 @@
 
 NeoBIF browses a KotOR **KEY/game-directory session**. Open `chitin.key`, choose a game directory, or supply BIFs for a KEY. ERF/MOD/SAV/HAK/NWM/RIM files discovered beneath that game directory are browsable using NeoShared's ERF core.
 
+Support is offered in the OpenKotOR Discord.
+
+[![OpenKotOR Discord](https://discordapp.com/api/guilds/739590575359262792/widget.png?style=banner2)](https://discord.gg/OpenKotOR)
+
 ## Search
 
 The **Search** bar above the resource tree searches the whole indexed session. **Ctrl+F** (Command+F on macOS) focuses it. Search is ASCII-case-insensitive for resource names/types; Enter applies immediately and Escape or the clear button removes the query. The match count includes unavailable indexed resources, whose status remains visible.
