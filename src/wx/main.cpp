@@ -37,7 +37,7 @@ private:
 };
 class NeoBIFApp final:public wxApp {
 public:bool OnInit()override {
-    SetAppName("NeoBIF");SetVendorName("Neo Tools");wxInitAllImageHandlers();
+    SetAppName("NeoBIF");SetVendorName("Neo Tools");wxui::initializeTheme("NeoBIF");wxInitAllImageHandlers();
     auto* frame=new NeoBIFFrame;frame->Show();
     if(argc>1){const auto path=neosettings::pathFromWx(wxString(argv[1]));frame->CallAfter([frame,path]{frame->openStartup(path);});}
     return true;
