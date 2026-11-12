@@ -13,7 +13,7 @@ permissions:
   contents: read
 
 concurrency:
-  group: ${{ github.workflow }}-${{ github.ref }}
+  group: ${{ github.workflow }}-${{ github.event_name }}-${{ github.event.pull_request.number || github.sha }}
   cancel-in-progress: true
 
 jobs:
@@ -139,6 +139,22 @@ jobs:
         uses: actions/upload-artifact@v7
         with:
           name: NeoBIF-windows-x86_64-${{ github.sha }}
-          path: tool/stage/
+          path: tool/stage/bin/NeoBIF.exe
           if-no-files-found: error
           retention-days: 14
+
+  macos:
+    uses: ./.github/workflows/macos.yml
+    secrets: inherit
+
+  release:
+    name: Publish release
+    needs: [linux, windows, macos]
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    permissions:
+      actions: read
+      contents: write
+    uses: vrifftech/neoshared/.github/workflows/publish-release.yml@main
+    with:
+      version-file: src/core/Version.hpp
+      artifact-pattern: NeoBIF-*

@@ -1,17 +1,14 @@
 name: macOS
 
 on:
-  push:
-  pull_request:
-  repository_dispatch:
-    types: [neoshared-updated]
+  workflow_call:
   workflow_dispatch:
 
 permissions:
   contents: read
 
 concurrency:
-  group: ${{ github.workflow }}-${{ github.ref }}
+  group: macos-${{ github.workflow }}-${{ github.event_name }}-${{ github.event.pull_request.number || github.sha }}
   cancel-in-progress: true
 
 env:
