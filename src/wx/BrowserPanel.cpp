@@ -333,6 +333,7 @@ private:
     neoshared::bif::LooseArchiveCatalog looseArchives_;
     std::filesystem::path keyPath_;
     std::filesystem::path scanRoot_;
+    neoshared::override_aliases::Game sessionGame_{neoshared::override_aliases::Game::Auto};
     std::vector<std::filesystem::path> supplementaryFiles_;
 #if defined(__EMSCRIPTEN__)
     std::vector<neoshared::bif::BrowserArchiveFile> browserFiles_;
@@ -397,7 +398,11 @@ private:
         }
         const std::filesystem::path displayPath = !scanRoot_.empty() ? scanRoot_ : keyPath_;
         const wxString path = neosettings::pathToWx(displayPath);
-        const std::string prefix = neoshared::bif::gameProfileName(archive_.gameProfile()) +
+        using Game = neoshared::override_aliases::Game;
+        const std::string gameName = sessionGame_ == Game::Kotor2 ? "KotOR II" :
+            sessionGame_ == Game::Kotor ? "KotOR I" :
+            neoshared::bif::gameProfileName(archive_.gameProfile());
+        const std::string prefix = gameName +
             (!scanRoot_.empty() ? " game directory: " : " archive: ");
         keyLabel_->SetLabel(wxui::toWx(prefix) + path);
         keyLabel_->SetToolTip(path);
@@ -654,6 +659,19 @@ private:
             if (event.GetKeyCode() == WXK_ESCAPE && !filter_->GetValue().empty()) clearSearch();
             else if (event.GetKeyCode() == WXK_RETURN || event.GetKeyCode() == WXK_NUMPAD_ENTER) flushSearch();
             else event.Skip();
+        });
+        tree_->Bind(wxEVT_CHAR, [this](wxKeyEvent& event) {
+            event.Skip();
+            const auto key = event.GetUnicodeKey();
+            if (key <= WXK_SPACE || key == WXK_DELETE ||
+                event.ControlDown() || event.AltDown() || event.MetaDown()) return;
+            tree_->CallAfter([tree = tree_]() {
+                const auto item = tree->GetFocusedItem();
+                if (item.IsOk()) {
+                    tree->UnselectAll();
+                    tree->SelectItem(item);
+                }
+            });
         });
         tree_->Bind(wxEVT_TREE_ITEM_EXPANDING,[this](wxTreeEvent& event){populateNode(event.GetItem());});
         tree_->Bind(wxEVT_TREE_SEL_CHANGED, [this](wxTreeEvent& event) {
@@ -1421,6 +1439,7 @@ private:
         if(scanRoot.empty())scanRoot=std::filesystem::current_path();
         scanRoot=std::filesystem::absolute(scanRoot).lexically_normal();
         neoshared::bif::KeyBifArchive loaded;neoshared::bif::LooseArchiveCatalog loose;
+        auto game = neoshared::override_aliases::Game::Auto;
         if(!runJob("Indexing game archives",[&](const neoshared::bif::JobControl& job){
             if(!loaded.open(key,supplementary,mappings,job))throw std::runtime_error(loaded.lastError());
             if(!loose.scan(scanRoot,8192u,job,loaded.gameProfile()))throw std::runtime_error(loose.lastError());
@@ -1435,7 +1454,8 @@ private:
                 if (!extension.empty() && extension.front() == '.') extension.erase(extension.begin());
                 if (!extension.empty()) overrideTypes.emplace(std::move(extension), resource.type);
             }
-            const auto overrideRoots = neoshared::override_aliases::discover(scanRoot);
+            game = neoshared::override_aliases::detectGame(scanRoot);
+            const auto overrideRoots = neoshared::override_aliases::discover(scanRoot, game);
             if (!loose.addOverrideDirectories(overrideRoots, overrideTypes, job))
                 throw std::runtime_error(loose.lastError());
             job.check();
@@ -1452,6 +1472,7 @@ private:
         looseArchives_ = std::move(loose);
         keyPath_ = key;
         scanRoot_ = std::move(scanRoot);
+        sessionGame_ = game;
         supplementaryFiles_ = std::move(supplementary);
         updateSessionLabel();
         setModuleTitle(appTitle() + " - " + neosettings::pathToWx(keyPath_.filename()));
@@ -1474,6 +1495,7 @@ private:
         looseArchives_.clear();
         keyPath_.clear();
         scanRoot_.clear();
+        sessionGame_ = neoshared::override_aliases::Game::Auto;
         supplementaryFiles_.clear();
         explicitRelocations_.clear();expandedNodes_.clear();selectedNodes_.clear();
         filterTimer_.Stop();
