@@ -24,11 +24,7 @@ std::filesystem::path checkedExportDestination(
         "Use the retained browser-file exporter, not native filesystem output");
 }
 
-SafeOutput::SafeOutput(
-    const std::filesystem::path&,
-    const std::filesystem::path&,
-    bool,
-    const std::vector<std::filesystem::path>&) {
+SafeOutput::SafeOutput(const std::filesystem::path&, bool) {
     throw std::runtime_error(
         "Native filesystem output is unavailable in the browser");
 }
@@ -62,6 +58,10 @@ void SafeOutput::commit() {
 #define NOMINMAX
 #endif
 #include <windows.h>
+#else
+#include <cerrno>
+#include <cstdio>
+#include <fcntl.h>
 #endif
 
 namespace neobif {
@@ -178,16 +178,6 @@ fs::path checkedExportDestination(
         }
     }
 
-    const fs::file_status status = fs::symlink_status(target, error);
-    if (error && error != std::errc::no_such_file_or_directory) {
-        throw filesystemFailure("Inspect output", target, error);
-    }
-    if (!error && fs::exists(status) && !fs::is_regular_file(status)) {
-        throw std::runtime_error(
-            "Output path is not a regular file: " +
-            neoshared::pathToUtf8(target));
-    }
-
     return target;
 }
 
@@ -207,47 +197,13 @@ struct SafeOutput::Impl {
     }
 };
 
-SafeOutput::SafeOutput(
-    const fs::path& root,
-    const fs::path& relative,
-    bool replace,
-    const std::vector<fs::path>& protectedInputs)
+SafeOutput::SafeOutput(const fs::path& target, bool replace)
     : impl_(std::make_unique<Impl>()) {
     Impl& state = *impl_;
     state.replace = replace;
-    state.target =
-        checkedExportDestination(root, relative, protectedInputs);
-
-    std::error_code error;
-    if (!replace && fs::exists(state.target, error)) {
-        if (error) {
-            throw filesystemFailure(
-                "Inspect output", state.target, error);
-        }
-        throw std::runtime_error(
-            "Output already exists: " +
-            neoshared::pathToUtf8(state.target));
-    }
-    if (error) {
-        throw filesystemFailure(
-            "Inspect output", state.target, error);
-    }
-
+    state.target = target;
     const fs::path parent = state.target.parent_path();
-    fs::create_directories(parent, error);
-    if (error) {
-        throw filesystemFailure(
-            "Create output directory", parent, error);
-    }
-    if (!fs::is_directory(parent, error) || error) {
-        if (error) {
-            throw filesystemFailure(
-                "Inspect output directory", parent, error);
-        }
-        throw std::runtime_error(
-            "Output parent is not a directory: " +
-            neoshared::pathToUtf8(parent));
-    }
+    std::error_code error;
 
     for (int attempt = 0; attempt < 32; ++attempt) {
         fs::path temporaryName = state.target.filename();
@@ -269,8 +225,7 @@ SafeOutput::SafeOutput(
         state.output.open(
             state.temporary,
             std::ios::binary | std::ios::out | std::ios::trunc);
-        if (state.output.is_open()) break;
-        state.output.clear();
+        break;
     }
 
     if (!state.output.is_open()) {
@@ -295,23 +250,6 @@ void SafeOutput::commit() {
     }
     state.output.close();
 
-    if (!state.replace) {
-        std::error_code error;
-        if (fs::exists(state.target, error)) {
-            if (error) {
-                throw filesystemFailure(
-                    "Inspect output", state.target, error);
-            }
-            throw std::runtime_error(
-                "Output already exists: " +
-                neoshared::pathToUtf8(state.target));
-        }
-        if (error) {
-            throw filesystemFailure(
-                "Inspect output", state.target, error);
-        }
-    }
-
 #if defined(_WIN32)
     const DWORD flags =
         state.replace ? MOVEFILE_REPLACE_EXISTING : 0u;
@@ -320,10 +258,17 @@ void SafeOutput::commit() {
         throw windowsFailure("Commit output", state.target);
     }
 #else
-    std::error_code error;
-    fs::rename(state.temporary, state.target, error);
-    if (error) {
-        throw filesystemFailure("Commit output", state.target, error);
+#if defined(__APPLE__)
+    const int result = ::renamex_np(state.temporary.c_str(), state.target.c_str(),
+                                   state.replace ? 0u : RENAME_EXCL);
+#else
+    const int result = ::renameat2(AT_FDCWD, state.temporary.c_str(),
+                                   AT_FDCWD, state.target.c_str(),
+                                   state.replace ? 0u : RENAME_NOREPLACE);
+#endif
+    if (result != 0) {
+        throw filesystemFailure("Commit output", state.target,
+                                std::error_code(errno, std::generic_category()));
     }
 #endif
 

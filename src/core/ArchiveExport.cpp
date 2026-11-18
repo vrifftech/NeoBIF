@@ -192,17 +192,7 @@ fs::path outputRoot(const fs::path& root) {
         throw std::runtime_error(
             "Unable to resolve output directory: " + error.message());
     }
-    result = result.lexically_normal();
-
-    const fs::file_status status = fs::status(result, error);
-    if (error && error != std::errc::no_such_file_or_directory) {
-        throw std::runtime_error(
-            "Unable to inspect output directory: " + error.message());
-    }
-    if (!error && fs::exists(status) && !fs::is_directory(status)) {
-        throw std::runtime_error("Output location is not a directory");
-    }
-    return result;
+    return result.lexically_normal();
 }
 
 fs::path numbered(const fs::path& path, std::size_t ordinal) {
@@ -348,6 +338,16 @@ ExportPlan planExportItems(
     plan.entries.reserve(items.size());
 
     const fs::path base = outputRoot(root);
+    std::error_code error;
+    const fs::file_status status = fs::status(base, error);
+    if (error && error != std::errc::no_such_file_or_directory) {
+        throw std::runtime_error(
+            "Unable to inspect output directory: " + error.message());
+    }
+    const bool outputExists = fs::exists(status);
+    if (outputExists && !fs::is_directory(status)) {
+        throw std::runtime_error("Output location is not a directory");
+    }
     const std::unordered_set<std::string> protectedKeys =
         protectedInputKeys(items, options);
 
@@ -416,7 +416,7 @@ ExportPlan planExportItems(
                 bool regularFile = false;
                 std::string inspectError;
                 const bool exists =
-                    targetExists(target, regularFile, inspectError);
+                    outputExists && targetExists(target, regularFile, inspectError);
                 if (!inspectError.empty()) {
                     throw std::runtime_error(inspectError);
                 }
@@ -480,6 +480,8 @@ ExtractionReport extractPlannedExportItems(
     const ExportOptions& options) {
     ExtractionReport report;
     try {
+        const auto base = outputRoot(root);
+        std::set<fs::path> directories;
         std::size_t done = 0u;
         for (const PlannedExport& entry : plan.entries) {
             if (entry.itemIndex >= items.size()) {
@@ -501,9 +503,10 @@ ExtractionReport extractPlannedExportItems(
                 try {
                     const bool replace =
                         options.existing == ExistingPolicy::Replace;
-                    // The plan already performed path and input checks. The
-                    // lightweight writer only guards against partial final files.
-                    SafeOutput output(root, entry.relativePath, replace, {});
+                    const auto target = base / entry.relativePath;
+                    if (directories.insert(target.parent_path()).second)
+                        fs::create_directories(target.parent_path());
+                    SafeOutput output(target, replace);
                     std::string error;
                     if (!consume(
                             item,
@@ -657,11 +660,9 @@ bool writeExportZip(
 
         const std::vector<fs::path> inputs =
             protectedInputs(items, options);
-        SafeOutput output(
-            path.parent_path(),
-            path.filename(),
-            options.existing == ExistingPolicy::Replace,
-            inputs);
+        const auto target = checkedExportDestination(path.parent_path(), path.filename(), inputs);
+        fs::create_directories(target.parent_path());
+        SafeOutput output(target, options.existing == ExistingPolicy::Replace);
         std::ostream& stream = output.stream();
 
         struct Central {

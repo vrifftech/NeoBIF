@@ -249,8 +249,6 @@ public:
         if(jobRunning_||!archiveOpen_||index>=looseArchives_.archives().size())return false;
         const auto& entry=looseArchives_.archives()[index];
         if(!entry.valid||entry.browserBacked||entry.overrideDirectory)return false;
-        if(!neoshared::bif::unchangedInput(entry.resolvedPath,entry.snapshot))
-            throw std::runtime_error("Archive changed since NeoBIF indexed it. Rescan before opening.");
         archiveOpen_(entry.resolvedPath,allInputPaths());return true;
     }
     void appendOpenCommands(wxMenu& menu) override {

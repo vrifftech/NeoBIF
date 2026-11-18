@@ -11,8 +11,8 @@ namespace neobif {
 // not pin directories, compare file identities, or attempt TOCTOU hardening.
 class SafeOutput final {
 public:
-    SafeOutput(const std::filesystem::path& root, const std::filesystem::path& relative,
-               bool replace, const std::vector<std::filesystem::path>& protectedInputs);
+    // The caller supplies a validated target in an existing directory.
+    SafeOutput(const std::filesystem::path& target, bool replace);
     ~SafeOutput();
     SafeOutput(const SafeOutput&) = delete;
     SafeOutput& operator=(const SafeOutput&) = delete;
