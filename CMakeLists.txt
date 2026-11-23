@@ -222,6 +222,7 @@ if(NEOBIF_BUILD_WX_GUI OR NEOBIF_BUILD_WX_MODULE)
             SLUG "neobif"
             ICON "${CMAKE_CURRENT_SOURCE_DIR}/resources/neobif.svg"
         )
+        neo_enable_updates(NeoBIF "NeoBIF" "${PROJECT_VERSION}")
         target_link_libraries(NeoBIF PRIVATE neobif_wx)
         if(NOT EMSCRIPTEN)
             find_package(Threads REQUIRED)
