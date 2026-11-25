@@ -480,7 +480,7 @@ private:
         auto* root = new wxPanel(this);
         auto* outer = new wxBoxSizer(wxVERTICAL);
 
-        auto* actionRow = new wxWrapSizer(wxHORIZONTAL);
+        auto* actionRow = new wxWrapSizer(wxHORIZONTAL, wxREMOVE_LEADING_SPACES);
         openDirectoryButton_ = new wxButton(root, ID_ScanDirectory, "Open Game Directory...");
         openFilesButton_ = new wxButton(root, ID_OpenArchive, "Open chitin.key...");
         addBifsButton_ = new wxButton(root, ID_AddBifs, "Add / Relocate BIF Files...");
