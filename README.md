@@ -1,4 +1,4 @@
-# NeoBIF 1.0.0
+# NeoBIF 
 
 NeoBIF browses a KotOR **KEY/game-directory session**. Open `chitin.key`, choose a game directory, or supply BIFs for a KEY. ERF/MOD/SAV/HAK/NWM/RIM files discovered beneath that game directory are browsable using NeoShared's ERF core.
 
