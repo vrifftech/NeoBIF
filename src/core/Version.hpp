@@ -1,6 +1,6 @@
 #pragma once
 
-#define NEOBIF_VERSION_STRING "1.2.5"
+#define NEOBIF_VERSION_STRING "1.2.6"
 
 namespace neobif {
 
