@@ -3,7 +3,7 @@
 #include <neoshared/bif/ResourceQuery.hpp>
 #include <neoshared/ResourceDocument.hpp>
 namespace neobif::ui {
-inline constexpr unsigned kBrowserApiVersion=6;
+inline constexpr unsigned kBrowserApiVersion=7;
 inline constexpr int kOpenResourceCommandId=wxID_HIGHEST+449;
 inline constexpr int kOpenWithFirstCommandId=wxID_HIGHEST+470;
 inline constexpr int kOpenWithCommandCapacity=16;
@@ -52,6 +52,8 @@ public:
     virtual void setArchiveOpenHandler(ArchiveOpenHandler handler)=0;
     virtual bool openDiscoveredArchive(std::size_t index)=0;
     virtual std::vector<std::filesystem::path> sourcePaths() const=0;
+    virtual std::filesystem::path activeKeyPath() const=0;
+    virtual bool indexComplete() const=0;
 };
 BrowserPanel* createBrowserPanel(wxWindow* parent, neomodules::Context context = {});
 } // namespace neobif::ui
